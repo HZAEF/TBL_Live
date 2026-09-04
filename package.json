@@ -1,6 +1,6 @@
 {
   "name": "tbl-live",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/node": "26.4.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
