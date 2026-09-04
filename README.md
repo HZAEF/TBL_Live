@@ -12,16 +12,16 @@ installation) :
   Étape C — Créez un NOUVEAU projet sur https://neon.com (Sign up avec
             GitHub, « Create project », région proche de vous) et copiez
             la chaîne de connexion PostgreSQL.
-  Étape D — Dans GitHub, ouvrez prisma/schema.prisma, cliquez sur le
-            crayon, remplacez « sqlite » par « postgresql » (une seule
-            ligne), puis « Commit changes ».
-  Étape E — Sur https://vercel.com (« Continue with GitHub ») :
+  Étape D — Sur https://vercel.com (« Continue with GitHub ») :
             « Add New… » → « Project » → Importez le dépôt tbl-live-v2.
             AVANT de déployer, ajoutez la variable d'environnement :
               Key   : DATABASE_URL
               Value : la chaîne de connexion Neon copiée à l'étape C
             puis « Deploy » (2-3 minutes).
-  Étape F — Ouvrez l'adresse https://tbl-live-v2-xxxx.vercel.app :
+            ✔ Plus RIEN à modifier dans les fichiers : la base est déjà
+            configurée pour Neon (PostgreSQL) et ses tables se créent
+            toutes seules pendant le déploiement.
+  Étape E — Ouvrez l'adresse https://tbl-live-v2-xxxx.vercel.app :
             c'est la NOUVELLE adresse à donner à vos étudiants.
 
 
@@ -29,10 +29,13 @@ POUR ESSAYER LOCALEMENT SUR VOTRE ORDINATEUR (optionnel, sans Internet)
 ------------------------------------------------------------------------
 1. Installez Node.js (version LTS) depuis https://nodejs.org.
 2. Décompressez ce ZIP dans un dossier, ouvrez un terminal dans ce dossier.
-3. Créez le fichier .env contenant la ligne :  DATABASE_URL="file:./dev.db"
+3. Dans prisma/schema.prisma, remplacez « postgresql » par « sqlite »
+   (une seule ligne, le temps du test local — ce dossier ne servira qu'en
+   local, il ne touche ni GitHub ni Neon).
+4. Créez le fichier .env contenant la ligne :  DATABASE_URL="file:./dev.db"
    (sous PowerShell : Set-Content -Path .env -Value 'DATABASE_URL="file:./dev.db"')
-4. Tapez :  npm install   puis :  npm run build
-5. Lancez :  node .next/standalone/server.js
+5. Tapez :  npm install   puis :  npm run build
+6. Lancez :  node .next/standalone/server.js
    puis ouvrez http://localhost:3000 dans votre navigateur.
 
 Bonne séance TBL !
