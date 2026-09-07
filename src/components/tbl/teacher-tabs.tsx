@@ -1535,8 +1535,9 @@ export function QuestionnaireTab({
 
 // Réglages de synchronisation mémorisés sur l'ordinateur de l'enseignant
 // (une adresse par séance) : adresse de la version en ligne + synchro
-// automatique toutes les 30 secondes pendant que le tableau de bord est
-// ouvert. Voir la section « Synchronisation » ci-dessous.
+// automatique toutes les 5 secondes (v2.8.2) et à chaque action de
+// l'enseignant pendant que le tableau de bord est ouvert. Voir la
+// section « Synchronisation » ci-dessous.
 export interface SyncConfig {
   url: string
   auto: boolean
@@ -1837,6 +1838,14 @@ export function ConfigurationsTab({
               'Si la séance est aussi servie par une autre version de l’application (version en ligne Vercel pendant que vous utilisez le réseau local, ou l’inverse), indiquez son adresse : cet ordinateur tire les réponses des étudiants connectés à l’autre version, fusionne tout, puis renvoie l’état complet. Aucun doublon, aucun conflit — et en cas de coupure réseau, la séance continue : relancez la synchronisation plus tard.'
             )}
           </p>
+          {/* v2.8.2 : la synchronisation est devenue quasi immédiate —
+              conseil d'usage : UN SEUL tableau de bord (celui-ci), les
+              étudiants rejoignent l'une ou l'autre adresse. */}
+          <p className="mt-1.5 rounded-xl bg-white/80 px-3 py-2 text-xs leading-relaxed text-sky-900">
+            {t(
+              'Synchronisation quasi immédiate : vos actions partent tout de suite et les contributions des étudiants arrivent en quelques secondes. Gardez ce tableau de bord ouvert sur cet ordinateur — c’est lui qui fait tourner la synchronisation. N’ouvrez pas en même temps le tableau de bord de la version en ligne : un seul « chef d’orchestre » à la fois.'
+            )}
+          </p>
         </div>
         <div>
           <Label htmlFor="cfg-sync-url">{t('Adresse de la version en ligne')}</Label>
@@ -1858,7 +1867,7 @@ export function ConfigurationsTab({
             disabled={!syncUrl.trim()}
             className="h-4 w-4 accent-emerald-600"
           />
-          {t('Synchroniser automatiquement (toutes les 30 secondes, pendant que ce tableau de bord est ouvert)')}
+          {t('Synchroniser automatiquement (toutes les 5 secondes et à chacune de vos actions, pendant que ce tableau de bord est ouvert)')}
         </label>
         <Button
           className="h-11 w-full bg-sky-600 hover:bg-sky-700"

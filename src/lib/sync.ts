@@ -980,10 +980,19 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
   await upsertLww(arr(b.saiResponses, MAX.saiResponses), 'saiResponse', 'saiResponsesUpserted')
 
   // ---- Signalements : union (insert-only) ----
+  // v2.8.2 : existence vérifiée AVANT l'insertion. Le miroir distant
+  // renvoie les signalements déjà fusionnés aux cycles suivants : on
+  // les ignore SANS déclencher d'erreur Prisma (avant, chaque cycle
+  // de synchronisation imprimait « Unique constraint failed (id) /
+  // prisma:error … alertEvent.create() » dans la console locale —
+  // inquiétant pour l'enseignante alors que les données étaient
+  // correctes : aucun signalement n'a jamais été dupliqué ni perdu).
   for (const raw of arr(b.alerts, MAX.alerts)) {
     const o = raw as Record<string, unknown>
     const id = typeof o.id === 'string' ? o.id : ''
     if (!id || typeof o.studentId !== 'string') continue
+    const existing = await db.alertEvent.findUnique({ where: { id }, select: { id: true } })
+    if (existing) continue
     try {
       await db.alertEvent.create({
         data: {
@@ -996,22 +1005,43 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
       })
       summary.alertsInserted += 1
     } catch {
-      // déjà présent : ignoré
+      // concurrence résiduelle : ignorée (aucun doublon)
     }
   }
 
-  // ---- Cas cliniques : OU logique sur « lancé » ----
+  // ---- Cas cliniques (v2.8.2) : UN seul cas ouvert à la fois ----
+  // L'enseignant est seul pilote : l'état d'ouverture vit sur
+  // l'ordinateur maître. La fusion adopte l'état d'ouverture DISTANT
+  // uniquement s'il est PLUS RÉCENT (dernier updatedAt touché) que le
+  // dernier changement local — sinon elle ne touche à rien : le miroir
+  // renvoyé par un cycle précédent ne rouvre pas un cas refermé
+  // localement (l'ancienne « OU logique » rouvrait le cas N-1 au
+  // cycle suivant). Dans le sens maître → miroir, l'état poussé est
+  // toujours le plus récent : rien ne change.
   const localCases = await db.case.findMany({ where: { sessionId: sid } })
   const localCaseIds = new Set(localCases.map((c) => c.id))
+  const localNewest = localCases.reduce(
+    (m, c) => Math.max(m, c.updatedAt ? c.updatedAt.getTime() : 0),
+    0
+  )
+  const remoteCases: { id: string; opened: boolean; at: number }[] = []
   for (const raw of arr(b.cases, MAX.cases)) {
     const o = raw as Record<string, unknown>
     const id = typeof o.id === 'string' ? o.id : ''
     if (!id || !localCaseIds.has(id)) continue
-    if (o.opened === true) {
-      const local = localCases.find((c) => c.id === id)
-      if (local && !local.opened) {
-        await db.case.update({ where: { id }, data: { opened: true } })
-        summary.casesOpened += 1
+    const u = dateOrNull(o.updatedAt)
+    remoteCases.push({ id, opened: o.opened === true, at: u ? u.getTime() : 0 })
+  }
+  const remoteNewest = remoteCases.reduce((m, c) => Math.max(m, c.at), 0)
+  if (remoteNewest > localNewest) {
+    for (const rc of remoteCases) {
+      const local = localCases.find((c) => c.id === rc.id)
+      if (local && local.opened !== rc.opened) {
+        await db.case.update({
+          where: { id: rc.id },
+          data: { opened: rc.opened, updatedAt: new Date(rc.at) },
+        })
+        if (rc.opened) summary.casesOpened += 1
       }
     }
   }

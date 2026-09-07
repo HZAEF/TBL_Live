@@ -152,6 +152,20 @@ export function saveTeacherSession(s: StoredTeacherSession) {
   writeJson(TEACHER_KEY, all)
 }
 
+// v2.8.2 : met à jour le TITRE mémorisé d'une séance de « Mes séances
+// sur cet appareil » (renommage via l'onglet Configurations). Ne crée
+// JAMAIS d'entrée (la séance doit déjà être mémorisée sur cet appareil)
+// et ne touche ni au jeton ni à la date de sauvegarde — l'ordre de la
+// liste reste stable. Corrige le bug : le titre de création restait
+// affiché après un changement de titre.
+export function refreshTeacherSessionMeta(code: string, title: string) {
+  const all = getTeacherSessions()
+  const cur = all[code]
+  if (!cur || cur.title === title) return
+  all[code] = { ...cur, title }
+  writeJson(TEACHER_KEY, all)
+}
+
 export function removeTeacherSession(code: string) {
   const all = getTeacherSessions()
   delete all[code]

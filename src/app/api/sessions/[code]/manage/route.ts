@@ -139,9 +139,14 @@ export async function POST(
         return NextResponse.json({ ok: true })
       }
 
-      // v2.7.0 — Lancer un cas clinique : les étudiants qui attendaient
-      // le voient apparaître (énoncé + questions) ; les autres peuvent y
-      // naviguer. Un cas lancé reste lancé (aucun retour en arrière).
+      // v2.7.0 — Lancer un cas clinique. v2.8.2 : un seul cas ouvert à la
+      // fois — l'enseignant est LE pilote : lancer le cas N fait tourner
+      // la page de toute la classe sur ce cas (énoncé + questions) et
+      // referme le précédent ; aucun bouton de navigation côté étudiant.
+      // Relancer un cas plus ancien le rouvre pour toute la classe
+      // (retour volontaire, p. ex. pour en reparler). updatedAt est
+      // horodaté pour que la fusion Internet ↔ réseau local adopte
+      // l'état d'ouverture le plus récent (voir sync.ts).
       case 'open_case': {
         const caseId = typeof body.caseId === 'string' ? body.caseId : ''
         if (session.status !== 'application') {
@@ -157,7 +162,17 @@ export async function POST(
           return NextResponse.json({ error: 'Cas clinique introuvable.' }, { status: 404 })
         }
         if (!c.opened) {
-          await db.case.update({ where: { id: c.id }, data: { opened: true } })
+          const now = new Date()
+          await db.$transaction([
+            db.case.updateMany({
+              where: { sessionId: session.id, id: { not: c.id } },
+              data: { opened: false, updatedAt: now },
+            }),
+            db.case.update({
+              where: { id: c.id },
+              data: { opened: true, updatedAt: now },
+            }),
+          ])
         }
         return NextResponse.json({ ok: true })
       }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowRight, Check, ChevronLeft, ChevronRight, Clock, Loader2, Lock, Save, Send, Star, Users, X } from 'lucide-react'
+import { ArrowRight, Check, Clock, Loader2, Save, Send, Star, Users, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
@@ -643,10 +643,12 @@ export function ApplicationView({
   )
 
   // Groupes affichés : un par cas clinique (+ un groupe pour les exercices
-  // libres de l'ancien format), affichés UN PAR UN.
-  // v2.7.0 : TOUS les cas sont listés (même non lancés) — un cas non lancé
-  // affiche une page d'attente neutre, sans énoncé ni questions : le
-  // serveur ne les envoie d'ailleurs pas du tout.
+  // libres de l'ancien format).
+  // v2.8.2 : PLUS DE NAVIGATION ÉTUDIANTE — un seul cas est ouvert à la
+  // fois (le serveur referme le précédent au lancement du suivant) : la
+  // page suit AUTOMATIQUEMENT le cas lancé par l'enseignant (polling
+  // 2,5 s). Un cas non lancé n'envoie ni énoncé ni questions : page
+  // d'attente neutre, aucun contenu ne fuit.
   const groups: CaseGroup[] = useMemo(() => {
     const gs: CaseGroup[] = (data.appCases ?? []).map((c) => ({
       key: c.id,
@@ -668,17 +670,10 @@ export function ApplicationView({
     return gs.filter((g) => g.questions.length > 0 || !g.opened)
   }, [data.appCases, questions])
 
-  // Premier groupe accessible non terminé par défaut (comme pour l'iRAT)
+  // Réponses déjà données par l'équipe (pour l'état « terminé » du cas).
   const answeredIds = useMemo(
     () => new Set(data.teamAppAnswers.map((a) => a.questionId)),
     [data.teamAppAnswers]
-  )
-  const firstPending = groups.findIndex(
-    (g) => g.opened && g.questions.some((q) => !answeredIds.has(q.id))
-  )
-  const firstAccessible = groups.findIndex((g) => g.opened)
-  const [groupIndex, setGroupIndex] = useState(() =>
-    Math.max(0, firstPending >= 0 ? firstPending : firstAccessible)
   )
   // v2.7.0 : brouillons des justifications (le texte reste à enregistrer
   // explicitement ; les RÉPONSES, elles, s'enregistrent au clic).
@@ -712,6 +707,40 @@ export function ApplicationView({
     setOptimistic({})
   }, [data.session.status])
 
+  // v2.8.2 : PLUS DE NAVIGATION — l'enseignant est seul pilote. La page
+  // suit automatiquement LE cas lancé (un seul cas ouvert à la fois,
+  // le lancement du cas N referme le précédent côté serveur). Séances
+  // de l'ancien format (questions d'application sans cas clinique) :
+  // exercices libres toujours accessibles. Calcul AVANT les retours
+  // anticipés (règle des hooks React : l'effet de défilement qui suit
+  // doit toujours être exécuté).
+  const caseGroups = groups.filter((g) => g.key !== 'libres')
+  const openCase = caseGroups.find((g) => g.opened) ?? null
+  const libres = groups.find((g) => g.key === 'libres') ?? null
+  const group = openCase ?? (caseGroups.length === 0 ? libres : null)
+  const caseNumber = openCase
+    ? caseGroups.indexOf(openCase) + 1
+    : Math.max(1, caseGroups.findIndex((g) => !g.opened) + 1)
+  const totalCases = caseGroups.length
+  const isLastCase = openCase !== null ? caseNumber === totalCases : libres !== null
+  const groupDone =
+    group !== null &&
+    group.questions.every(
+      (q) => answeredIds.has(q.id) || revealedIds.has(q.id)
+    )
+  const allDone = groups.every(
+    (g) =>
+      !g.opened ||
+      g.questions.every((q) => answeredIds.has(q.id) || revealedIds.has(q.id))
+  )
+
+  // v2.8.2 : quand l'enseignant lance un autre cas, la page « tourne » —
+  // on remonte en haut pour montrer l'énoncé du nouveau cas.
+  const groupKey = group?.key
+  useEffect(() => {
+    window.scrollTo({ top: 0 })
+  }, [groupKey])
+
   if (!data.me.team) {
     return (
       <InfoCard tone="amber" title={t("Vous n’êtes pas dans une équipe")}>
@@ -728,19 +757,6 @@ export function ApplicationView({
       </InfoCard>
     )
   }
-
-  const group = groups[Math.min(groupIndex, groups.length - 1)]
-  const isLastGroup = groupIndex >= groups.length - 1
-  const groupDone =
-    group.opened &&
-    group.questions.every(
-      (q) => answeredIds.has(q.id) || revealedIds.has(q.id)
-    )
-  const allDone = groups.every(
-    (g) =>
-      !g.opened ||
-      g.questions.every((q) => answeredIds.has(q.id) || revealedIds.has(q.id))
-  )
 
   // v2.7.0 : enregistrement AUTOMATIQUE à CHAQUE clic — plus de bouton
   // « Mettre à jour » : si l'équipe change d'avis (A puis B), la réponse
@@ -794,58 +810,25 @@ export function ApplicationView({
         <strong>{t('chaque clic enregistre la réponse de votre équipe')}</strong>
         {t('. Vous pouvez changer d’avis jusqu’à la révélation : le dernier clic remplace le précédent. Les réponses sont')}{' '}
         <strong>{t('révélées automatiquement')}</strong>
-        {t('dès que toutes les équipes auront répondu.')}
+        {t('dès que toutes les équipes auront répondu.')}{' '}
+        {t('Votre professeur lance chaque cas l’un après l’autre : la page changera toute seule, aucun bouton à chercher.')}
       </InfoCard>
 
-      {/* Sélecteur de cas (un cas à la fois) — les cas non lancés sont
-          verrouillés (cadenas) mais consultables : ils affichent la page
-          d'attente. */}
-      {groups.length > 1 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {groups.map((g, i) => {
-            const gDone =
-              g.opened &&
-              g.questions.every(
-                (q) => answeredIds.has(q.id) || revealedIds.has(q.id)
-              )
-            return (
-              <button
-                key={g.key}
-                onClick={() => setGroupIndex(i)}
-                aria-label={t("Aller à l'application {n}", { n: i + 1 })}
-                className={cn(
-                  'flex h-9 w-9 items-center justify-center rounded-full border-2 text-xs font-bold transition-colors',
-                  i === groupIndex
-                    ? 'border-lime-600 bg-white text-lime-700'
-                    : gDone
-                      ? 'border-lime-500 bg-lime-500 text-white'
-                      : 'border-stone-300 bg-white text-stone-400'
-                )}
-              >
-                {gDone && i !== groupIndex ? (
-                  <Check className="h-4 w-4" />
-                ) : g.opened ? (
-                  i + 1
-                ) : (
-                  <Lock className="h-3.5 w-3.5" />
-                )}
-              </button>
-            )
-          })}
-        </div>
-      )}
+      {/* v2.8.2 : sélecteur de cas et boutons Précédent / Cas suivant
+          SUPPRIMÉS (demande de l'enseignante) — la page tourne toute
+          seule quand l'enseignant lance le cas suivant. */}
 
-      {/* Cas non lancé : PAGE D'ATTENTE neutre — l'enseignant ouvre chaque
-          cas au moment de l'expliquer, aucun contenu ne fuite. */}
-      {!group.opened ? (
-        <CaseWaitCard caseNumber={groupIndex + 1} total={groups.length} />
+      {/* Aucun cas lancé : PAGE D'ATTENTE neutre — l'enseignant ouvre
+          chaque cas au moment de l'expliquer, aucun contenu ne fuit. */}
+      {!group ? (
+        <CaseWaitCard caseNumber={caseNumber} total={totalCases} />
       ) : (
         <>
           {/* En-tête du cas courant */}
           <div className="rounded-2xl border-2 border-lime-300 bg-lime-50 p-5">
             <p className="text-xs font-bold uppercase tracking-wide text-lime-700">
-              {groups.length > 1
-                ? t('Application {i} sur {n}', { i: groupIndex + 1, n: groups.length })
+              {totalCases > 1
+                ? t('Application {i} sur {n}', { i: caseNumber, n: totalCases })
                 : t('Application')}
               {!groupDone && t(' — en cours')}
               {groupDone && t(' — terminé')}
@@ -886,44 +869,24 @@ export function ApplicationView({
         </>
       )}
 
-      {/* Navigation entre cas */}
-      <div className="flex gap-3">
-        <Button
-          variant="outline"
-          className="h-12 flex-1 border-stone-300 text-stone-700"
-          disabled={groupIndex === 0}
-          onClick={() => {
-            setGroupIndex(Math.max(0, groupIndex - 1))
-            window.scrollTo({ top: 0 })
-          }}
-        >
-          <ChevronLeft className="mr-1 h-5 w-5 rtl:rotate-180" />
-          {t('Précédent')}
-        </Button>
-        {!isLastGroup ? (
-          <Button
-            className="h-12 flex-[2] bg-lime-600 text-base hover:bg-lime-700"
-            onClick={() => {
-              setGroupIndex(Math.min(groups.length - 1, groupIndex + 1))
-              window.scrollTo({ top: 0 })
-            }}
-          >
-            {groupDone ? t('Cas suivant') : t('Passer au cas suivant')}
-            <ChevronRight className="ml-2 h-5 w-5 rtl:rotate-180" />
-          </Button>
-        ) : (
-          <div className="flex flex-[2] items-center justify-center rounded-xl border-2 border-dashed border-stone-300 px-3 text-center text-sm text-stone-500">
-            {allDone ? (
-              <span className="font-semibold text-emerald-700">
-                <Check className="mr-1 inline h-4 w-4" />
-                {t('Tous les cas sont traités — attendez votre professeur.')}
-              </span>
-            ) : (
-              t('Dernier cas — attendez les autres équipes et votre professeur.')
-            )}
-          </div>
-        )}
-      </div>
+      {/* v2.8.2 : plus de boutons de navigation — un simple état
+          d'avancement : l'enseignant pilote le passage au cas suivant. */}
+      {group && (
+        <div className="flex items-center justify-center rounded-xl border-2 border-dashed border-stone-300 px-3 py-3 text-center text-sm text-stone-500">
+          {allDone ? (
+            <span className="font-semibold text-emerald-700">
+              <Check className="mr-1 inline h-4 w-4" />
+              {t('Tous les cas sont traités — attendez votre professeur.')}
+            </span>
+          ) : isLastCase ? (
+            t('Dernier cas — attendez les autres équipes et votre professeur.')
+          ) : groupDone ? (
+            t('Ce cas est traité — votre professeur lancera le suivant.')
+          ) : (
+            t('Répondez en équipe — votre professeur lancera le cas suivant le moment venu.')
+          )}
+        </div>
+      )}
     </div>
   )
 }

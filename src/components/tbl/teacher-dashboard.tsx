@@ -35,7 +35,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { api, removeTeacherSession, usePoll } from '@/lib/tbl-client'
+import { api, refreshTeacherSessionMeta, removeTeacherSession, usePoll } from '@/lib/tbl-client'
 import {
   PHASE_INFO,
   PHASE_ORDER,
@@ -62,6 +62,31 @@ import {
 } from './teacher-tabs'
 import { StatsTab } from './stats-tab'
 import { downloadBlob } from '@/lib/xlsx-writer'
+
+// v2.8.2 — Synchronisation d'arrière-plan Internet ↔ réseau local.
+// Partagée par le cycle automatique (toutes les 5 secondes) ET par le
+// déclenchement immédiat qui suit CHAQUE action de l'enseignant
+// (changement de phase, lancement d'un cas, feedback…) : les étudiants
+// connectés à l'autre version voient la page tourner sans attendre le
+// prochain cycle. Un seul cycle à la fois par séance — jamais de
+// chevauchement (un cycle = tirage + fusion + envoi du miroir complet,
+// quelques centaines de millisecondes sur une séance ordinaire).
+// Silencieuse : une coupure réseau n'affiche rien, la séance continue.
+const syncInFlight = new Set<string>()
+function backgroundSync(code: string, token: string) {
+  const cfg = readSyncConfig(code)
+  if (!cfg?.auto || !cfg.url) return
+  if (syncInFlight.has(code)) return
+  syncInFlight.add(code)
+  api(`/api/sessions/${code}/manage`, {
+    method: 'POST',
+    body: JSON.stringify({ token, action: 'sync_now', remoteUrl: cfg.url }),
+  })
+    .catch(() => undefined)
+    .finally(() => {
+      syncInFlight.delete(code)
+    })
+}
 
 export function TeacherDashboard({
   code,
@@ -114,6 +139,10 @@ export function TeacherDashboard({
         method: 'POST',
         body: JSON.stringify({ token, action, ...extra }),
       })
+      // v2.8.2 : l'action part immédiatement vers la version en ligne
+      // (si la synchronisation automatique est activée) — les étudiants
+      // de l'autre version n'attendent pas le prochain cycle de 5 s.
+      backgroundSync(code, token)
       await refresh()
       return true
     } catch (e) {
@@ -191,24 +220,33 @@ export function TeacherDashboard({
   const ratQs = useMemo(() => data?.questions.filter((q) => q.phase === 'rat') ?? [], [data])
   const appQs = useMemo(() => data?.questions.filter((q) => q.phase === 'application') ?? [], [data])
 
-  // v2.7.0 — Synchronisation automatique Internet ↔ réseau local :
-  // toutes les 30 secondes pendant que ce tableau de bord est ouvert
-  // (réglage de l'onglet Configurations). Silencieuse : une coupure réseau
-  // n'affiche rien — la séance continue et la date de dernière
-  // synchronisation (onglet Configurations) reflète l'état réel. Le tableau
-  // de bord se rafraîchit tout seul (2,5 s) après chaque synchronisation.
-  // NB : déclaré AVANT les retours anticipés (règle des hooks React).
+  // v2.8.2 : « Mes séances sur cet appareil » suit les renommages —
+  // le titre mémorisé à la création restait affiché après un changement
+  // de titre dans l'onglet Configurations (bug signalé par
+  // l'enseignante). Chaque rafraîchissement du tableau de bord met à
+  // jour le titre mémorisé (le jeton et la date de sauvegarde ne
+  // bougent pas, l'ordre de la liste reste stable).
+  useEffect(() => {
+    const title = data?.session.title
+    if (title) refreshTeacherSessionMeta(code, title)
+  }, [code, data?.session.title])
+
+  // v2.7.0 — Synchronisation automatique Internet ↔ réseau local.
+  // v2.8.2 : QUASI IMMÉDIATE — toutes les 5 secondes (au lieu de 30)
+  // + immédiatement après chaque action de l'enseignant (voir manage
+  // ci-dessous). Les contributions tirées apparaissent d'elles-mêmes :
+  // le tableau de bord se rafraîchit tout seul (2,5 s). Silencieuse :
+  // une coupure réseau n'affiche rien, la séance continue et la date
+  // de dernière synchronisation (onglet Configurations) reflète l'état
+  // réel. NB : déclaré AVANT les retours anticipés (règle des hooks
+  // React).
   useEffect(() => {
     if (!data?.session.code || data.session.deletedAt) return
     const sessionCode = data.session.code
     const id = setInterval(() => {
-      const cfg = readSyncConfig(sessionCode)
-      if (!cfg?.auto || !cfg.url || document.hidden) return
-      api(`/api/sessions/${sessionCode}/manage`, {
-        method: 'POST',
-        body: JSON.stringify({ token, action: 'sync_now', remoteUrl: cfg.url }),
-      }).catch(() => undefined)
-    }, 30_000)
+      if (document.hidden) return
+      backgroundSync(sessionCode, token)
+    }, 5_000)
     return () => clearInterval(id)
   }, [data?.session.code, data?.session.deletedAt, token])
 
@@ -1391,7 +1429,7 @@ function OverviewPanel({
             </p>
             <p className="mt-0.5 text-xs leading-relaxed text-lime-800">
               {t(
-                'Tant qu’un cas n’est pas lancé, les étudiants voient une page d’attente : aucune avance possible. Un cas lancé reste accessible jusqu’au bout de la séance.'
+                'Tant qu’un cas n’est pas lancé, les étudiants voient une page d’attente. Lancer un cas fait tourner la page de toute la classe sur ce cas — l’ancien se referme, vous seul pilotez. Relancer un cas plus ancien ramène toute la classe dessus.'
               )}
             </p>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
