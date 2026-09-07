@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json(
             {
               error:
-                'Cette séance existe déjà : saisissez son code PIN actuel (ou passez par l’onglet Configurations du tableau de bord) pour la restaurer.',
+                'Cette séance existe déjà : saisissez son code PIN actuel pour la restaurer.',
             },
             { status: 401 }
           )

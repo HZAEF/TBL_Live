@@ -61,6 +61,7 @@ import {
   exportXlsx,
 } from './teacher-tabs'
 import { StatsTab } from './stats-tab'
+import { downloadBlob } from '@/lib/xlsx-writer'
 
 export function TeacherDashboard({
   code,
@@ -94,8 +95,11 @@ export function TeacherDashboard({
   const [dupPin, setDupPin] = useState('')
   const [duplicating, setDuplicating] = useState(false)
   // v2.4.0 : sauvegarde complète (JSON) — copie hors-ligne de toutes les
-  // données de la séance. v2.7.0 : le bouton vit dans l'onglet
-  // « Configurations » (plus ici).
+  // données de la séance. v2.8.1 : le bouton revient dans l'en-tête du
+  // tableau de bord, à son ancienne place à côté de « Dupliquer »
+  // (demande de l'enseignante) ; le téléversement d'une sauvegarde vit
+  // désormais dans l'écran d'accueil enseignant.
+  const [backingUp, setBackingUp] = useState(false)
   const { t } = useI18n()
 
   useEffect(() => {
@@ -159,8 +163,30 @@ export function TeacherDashboard({
     }
   }
 
-  // Sauvegarde complète : déplacée dans l'onglet « Configurations »
-  // (v2.7.0) — la fonction doBackup vit maintenant dans teacher-tabs.
+  // Sauvegarde complète (v2.8.1) : de retour dans l'en-tête du tableau de
+  // bord, à côté de « Dupliquer ». Le fichier .json produit se téléverse
+  // depuis l'écran d'accueil enseignant (« Téléverser une séance ») pour
+  // restaurer ou transférer la séance sur un autre appareil.
+  const doBackup = async () => {
+    setBackingUp(true)
+    try {
+      const res = await api<Record<string, unknown>>(`/api/sessions/${code}/manage`, {
+        method: 'POST',
+        body: JSON.stringify({ token, action: 'export_backup' }),
+      })
+      const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' })
+      downloadBlob(blob, `sauvegarde-tbl-${code}.json`)
+      toast({ title: t('Fichier de sauvegarde téléchargé.') })
+    } catch (e) {
+      toast({
+        title: t('Action impossible'),
+        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
+        variant: 'destructive',
+      })
+    } finally {
+      setBackingUp(false)
+    }
+  }
 
   const ratQs = useMemo(() => data?.questions.filter((q) => q.phase === 'rat') ?? [], [data])
   const appQs = useMemo(() => data?.questions.filter((q) => q.phase === 'application') ?? [], [data])
@@ -255,6 +281,17 @@ export function TeacherDashboard({
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-stone-300"
+              onClick={doBackup}
+              disabled={backingUp}
+              title={t('Télécharger une copie complète de la séance (fichier JSON)')}
+            >
+              <Download className="mr-1 h-4 w-4" />
+              {t('Sauvegarder')}
+            </Button>
             <Button
               variant="outline"
               size="sm"

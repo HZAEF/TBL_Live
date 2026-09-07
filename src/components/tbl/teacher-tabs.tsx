@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import {
   Check,
   Download,
@@ -11,7 +11,6 @@ import {
   Save,
   ShieldAlert,
   Trash2,
-  Upload,
   Users,
   Wand2,
   Wifi,
@@ -1588,9 +1587,6 @@ export function ConfigurationsTab({
   const [savingPin, setSavingPin] = useState(false)
   const [minutes, setMinutes] = useState(String(data.session.iratMinutes))
   const [savingMinutes, setSavingMinutes] = useState(false)
-  const [backingUp, setBackingUp] = useState(false)
-  const [importing, setImporting] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
   const [syncUrl, setSyncUrl] = useState(() => readSyncConfig(data.session.code)?.url ?? '')
   const [autoSync, setAutoSync] = useState(() => readSyncConfig(data.session.code)?.auto ?? false)
   const [syncing, setSyncing] = useState(false)
@@ -1603,73 +1599,12 @@ export function ConfigurationsTab({
     else writeSyncConfig(data.session.code, null)
   }
 
-  // Sauvegarde complète (bouton déplacé ici depuis l'en-tête du tableau
-  // de bord — tout ce qui concerne la gestion de la séance se trouve
-  // désormais dans cette rubrique).
-  const doBackup = async () => {
-    setBackingUp(true)
-    try {
-      const res = await api<Record<string, unknown>>(
-        `/api/sessions/${data.session.code}/manage`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ token, action: 'export_backup' }),
-        }
-      )
-      const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' })
-      downloadBlob(blob, `sauvegarde-tbl-${data.session.code}.json`)
-      toast({ title: t('Fichier de sauvegarde téléchargé.') })
-    } catch (e) {
-      toast({
-        title: t('Action impossible'),
-        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
-        variant: 'destructive',
-      })
-    } finally {
-      setBackingUp(false)
-    }
-  }
-
-  // Téléversement d'une séance déjà téléchargée : recrée la séance sur CET
-  // appareil (ou la restaure) — pour la déployer sur n'importe quelle
-  // machine, notamment en mode réseau local.
-  const doImport = async (file: File) => {
-    setImporting(true)
-    try {
-      const text = await file.text()
-      const backup = JSON.parse(text) as { session?: { code?: string } }
-      const fileCode = backup?.session?.code
-      if (fileCode && fileCode.toUpperCase() !== data.session.code.toUpperCase()) {
-        toast({
-          title: t('Séance différente'),
-          description: t(
-            'Ce fichier appartient à la séance {code} — vous êtes sur la séance {current}. Ouvrez-le depuis l’accueil si vous voulez la recréer ici.',
-            { code: fileCode, current: data.session.code }
-          ),
-          variant: 'destructive',
-        })
-        return
-      }
-      await api('/api/sessions/import', {
-        method: 'POST',
-        body: JSON.stringify({ backup, token }),
-      })
-      toast({
-        title: t('Séance restaurée depuis le fichier'),
-        description: t('Toutes les données du fichier remplacent celles de cet appareil.'),
-      })
-      await refresh()
-    } catch (e) {
-      toast({
-        title: t('Import impossible'),
-        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
-        variant: 'destructive',
-      })
-    } finally {
-      setImporting(false)
-      if (fileRef.current) fileRef.current.value = ''
-    }
-  }
+  // v2.8.1 : les boutons « Sauvegarder » (en-tête du tableau de bord,
+  // à côté de « Dupliquer ») et « Téléverser une séance » (écran
+  // d'accueil enseignant) ne vivent plus dans cet onglet — l'enseignante
+  // l'a demandé : chaque chose à sa place, la rubrique Configurations
+  // ne garde que les réglages (titre, durée, PIN, exclusion,
+  // synchronisation).
 
   const doSync = async () => {
     if (!syncUrl.trim() || syncing) return
@@ -1825,53 +1760,6 @@ export function ConfigurationsTab({
               <p className="mt-1.5 text-xs text-red-600">{t('Les deux PIN ne correspondent pas.')}</p>
             )}
           </div>
-        </div>
-      </section>
-
-      {/* ---- Sauvegarde / téléversement ---- */}
-      <section className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4">
-        <div>
-          <p className="text-sm font-bold text-stone-900">{t('Sauvegarde et transfert de la séance')}</p>
-          <p className="mt-0.5 text-xs text-stone-500">
-            {t(
-              'Copie complète hors ligne (questions, équipes, réponses, notes) : à télécharger avant chaque mise à jour, et à téléverser pour déployer la séance sur un autre appareil.'
-            )}
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          className="h-11 w-full border-stone-300 text-stone-700 hover:bg-stone-50"
-          onClick={doBackup}
-          disabled={backingUp}
-        >
-          {backingUp ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-          {t('Télécharger la séance (fichier de sauvegarde)')}
-        </Button>
-        <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/50 p-3">
-          <p className="text-sm font-semibold text-stone-800">{t('Téléverser la séance déjà téléchargée')}</p>
-          <p className="mt-0.5 text-xs leading-relaxed text-stone-600">
-            {t(
-              'Choisissez un fichier de sauvegarde de cette séance : ses données remplacent celles de cet appareil (utile pour restaurer, ou pour transférer la séance vers l’ordinateur du réseau local).'
-            )}
-          </p>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".json,application/json"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) void doImport(f)
-            }}
-          />
-          <Button
-            className="mt-2 h-11 w-full bg-emerald-600 hover:bg-emerald-700"
-            disabled={importing}
-            onClick={() => fileRef.current?.click()}
-          >
-            {importing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-            {t('Choisir un fichier de sauvegarde…')}
-          </Button>
         </div>
       </section>
 
