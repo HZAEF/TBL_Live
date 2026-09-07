@@ -164,7 +164,15 @@ export function StudentSession({
         {status === 'irat' && <IratQuiz data={data} refresh={refresh} token={token} />}
         {status === 'trat' && <TratQuiz data={data} refresh={refresh} token={token} />}
         {status === 'appeal' && <AppealView data={data} refresh={refresh} token={token} />}
-        {status === 'feedback' && <FeedbackView data={data} />}
+        {/* v2.7.0 : écran d'attente entre réclamations et feedback — aucune
+            donnée de résultats n'est envoyée par le serveur tant que
+            l'enseignant n'a pas lancé le feedback : rien à capturer. */}
+        {status === 'feedback' &&
+          (data.session.feedbackReady === false ? (
+            <FeedbackWaitView />
+          ) : (
+            <FeedbackView data={data} />
+          ))}
         {status === 'application' && <ApplicationView data={data} refresh={refresh} token={token} />}
         {status === 'peer' && <PeerView data={data} refresh={refresh} token={token} />}
         {status === 'finished' && <FinishedView data={data} token={token} refresh={refresh} onExit={onExit} />}
@@ -264,6 +272,36 @@ function LobbyView({ data }: { data: StudentStateDTO }) {
             )}
           </p>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ================= Attente avant le feedback (v2.7.0) =================
+
+// Entre les réclamations et le feedback, l'étudiant voit cet écran NEUTRE :
+// le serveur ne lui envoie ni questions, ni réponses, ni statistiques tant
+// que l'enseignant n'a pas cliqué « Lancer le feedback » — impossible de
+// capturer les résultats en avance, l'attention reste sur le professeur.
+function FeedbackWaitView() {
+  const { t } = useI18n()
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-8 text-center shadow-sm">
+        <div className="mx-auto flex h-16 w-16 animate-pulse items-center justify-center rounded-full bg-emerald-100">
+          <Clock className="h-8 w-8 text-emerald-600" />
+        </div>
+        <p className="mt-4 text-lg font-bold text-emerald-900">
+          {t('Préparez-vous à écouter votre professeur')}
+        </p>
+        <p className="mt-2 text-sm leading-relaxed text-emerald-800">
+          {t(
+            'Les réclamations sont terminées. Votre professeur va vous commenter les résultats : vos notes apparaîtront ici seulement quand il lancera le feedback.'
+          )}
+        </p>
+        <p className="mt-3 rounded-xl bg-white/70 px-4 py-2 text-xs font-semibold text-emerald-700">
+          {t('Gardez cette page ouverte — elle passera toute seule au feedback.')}
+        </p>
       </div>
     </div>
   )

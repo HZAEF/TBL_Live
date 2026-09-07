@@ -53,6 +53,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Choix invalide.' }, { status: 400 })
     }
 
+    // v2.7.0 : un cas clinique non lancé par l'enseignant est INACCESSIBLE
+    // — l'énoncé et les questions ne sont même pas envoyés aux étudiants,
+    // et toute réponse directe (requête fabriquée) est refusée ici.
+    if (question.caseId) {
+      const c = await db.case.findUnique({ where: { id: question.caseId } })
+      if (c && !c.opened) {
+        return NextResponse.json(
+          {
+            error:
+              'Ce cas clinique n’a pas encore été lancé par votre professeur — patientez, l’écran se mettra à jour tout seul.',
+          },
+          { status: 409 }
+        )
+      }
+    }
+
     // Révélation par question : une question dont toutes les équipes actives
     // ont répondu (ou que l'enseignant a forcée) est verrouillée.
     const [allAppQuestions, students, appAnswers] = await Promise.all([

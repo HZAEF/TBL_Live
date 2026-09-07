@@ -1,12 +1,11 @@
 {
   "name": "tbl-live",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "prisma generate && node scripts/db-apply.mjs && next build && node scripts/postbuild.mjs",
     "start": "node .next/standalone/server.js",
-    "lan": "node scripts/lan-server.mjs",
     "lint": "eslint .",
     "test": "vitest run",
     "db:push": "prisma db push",

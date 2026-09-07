@@ -60,7 +60,14 @@ export async function POST(req: NextRequest) {
     if (allDone) {
       await db.session.update({
         where: { id: student.sessionId },
-        data: { status: 'feedback', phaseStartedAt: new Date() },
+        data: {
+          status: 'feedback',
+          phaseStartedAt: new Date(),
+          // v2.7.0 : passage automatique → les étudiants voient d'abord
+          // l'écran d'attente ; l'enseignant lance l'affichage des
+          // résultats avec « Lancer le feedback ».
+          feedbackReady: false,
+        },
       })
     }
 

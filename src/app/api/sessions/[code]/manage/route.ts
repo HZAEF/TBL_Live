@@ -14,6 +14,7 @@ import {
 import { hashPin } from '@/lib/pin'
 import { isTrashExpired } from '@/lib/session-lifecycle'
 import { SAI_SUBSCALES, DEFAULT_SAI_ITEMS } from '@/lib/sai'
+import { buildSyncBackup, syncNow, normalizeRemoteUrl, SyncError } from '@/lib/sync'
 // Renumérote les questions « libres » d'une phase (rat ou application,
 // sans cas associé) : 0, 1, 2, … Garantit un ordre stable et sans doublons
 // après une suppression ou un changement de phase.
@@ -95,6 +96,10 @@ export async function POST(
             phaseStartedAt: new Date(),
             // On repart d'une révélation cachée à chaque nouvelle phase d'application
             revealed: phase === 'application' ? false : session.revealed,
+            // v2.7.0 : en entrant dans le feedback, les étudiants voient
+            // d'abord l'écran d'attente — l'enseignant lance l'affichage
+            // des résultats avec « Lancer le feedback » (launch_feedback).
+            feedbackReady: phase === 'feedback' ? false : session.feedbackReady,
           },
         })
         // En entrant (ou revenant) dans la phase réclamations, on repart de
@@ -106,6 +111,86 @@ export async function POST(
             data: { appealsDone: false },
           })
         }
+        // v2.7.0 : en entrant dans la phase d'application, tous les cas
+        // cliniques redeviennent NON lancés — l'enseignant ouvre chaque cas
+        // au moment de l'expliquer (boutons « Lancer le cas clinique N »).
+        if (phase === 'application') {
+          await db.case.updateMany({
+            where: { sessionId: session.id },
+            data: { opened: false },
+          })
+        }
+        return NextResponse.json({ ok: true })
+      }
+
+      // v2.7.0 — Lancer l'affichage du feedback aux étudiants (fin de
+      // l'écran d'attente entre réclamations et feedback).
+      case 'launch_feedback': {
+        if (session.status !== 'feedback') {
+          return NextResponse.json(
+            { error: 'La phase de feedback n’est pas ouverte.' },
+            { status: 409 }
+          )
+        }
+        await db.session.update({
+          where: { id: session.id },
+          data: { feedbackReady: true },
+        })
+        return NextResponse.json({ ok: true })
+      }
+
+      // v2.7.0 — Lancer un cas clinique : les étudiants qui attendaient
+      // le voient apparaître (énoncé + questions) ; les autres peuvent y
+      // naviguer. Un cas lancé reste lancé (aucun retour en arrière).
+      case 'open_case': {
+        const caseId = typeof body.caseId === 'string' ? body.caseId : ''
+        if (session.status !== 'application') {
+          return NextResponse.json(
+            { error: 'La phase d’application n’est pas ouverte.' },
+            { status: 409 }
+          )
+        }
+        const c = await db.case.findFirst({
+          where: { id: caseId, sessionId: session.id },
+        })
+        if (!c) {
+          return NextResponse.json({ error: 'Cas clinique introuvable.' }, { status: 404 })
+        }
+        if (!c.opened) {
+          await db.case.update({ where: { id: c.id }, data: { opened: true } })
+        }
+        return NextResponse.json({ ok: true })
+      }
+
+      // v2.7.0 — Modifier le titre de la séance (onglet Configurations).
+      case 'set_title': {
+        const title = typeof body.title === 'string' ? body.title.trim() : ''
+        if (title.length < 2 || title.length > 120) {
+          return NextResponse.json(
+            { error: 'Le titre doit contenir entre 2 et 120 caractères.' },
+            { status: 400 }
+          )
+        }
+        await db.session.update({ where: { id: session.id }, data: { title } })
+        return NextResponse.json({ ok: true })
+      }
+
+      // v2.7.0 — Changer le code PIN enseignant (onglet Configurations).
+      case 'set_pin': {
+        const pin = typeof body.pin === 'string' ? body.pin : ''
+        if (!isValidPin(pin)) {
+          return NextResponse.json(
+            {
+              error:
+                'Le code PIN doit contenir 6 à 12 caractères, chiffres et lettres (sans accents ni symboles).',
+            },
+            { status: 400 }
+          )
+        }
+        await db.session.update({
+          where: { id: session.id },
+          data: { teacherPin: await hashPin(normalizePin(pin)), pinAttempts: 0, pinLockedUntil: null },
+        })
         return NextResponse.json({ ok: true })
       }
 
@@ -115,20 +200,6 @@ export async function POST(
           return NextResponse.json({ error: 'Durée invalide (1 à 90 minutes).' }, { status: 400 })
         }
         await db.session.update({ where: { id: session.id }, data: { iratMinutes: minutes } })
-        return NextResponse.json({ ok: true })
-      }
-
-      case 'rename_session': {
-        // v2.7.0 — onglet « Configurations » : modification du titre de la
-        // séance après création (faute de frappe, nouvelle promotion…).
-        const title = typeof body.title === 'string' ? body.title.trim() : ''
-        if (title.length < 2 || title.length > 80) {
-          return NextResponse.json(
-            { error: 'Le titre doit contenir entre 2 et 80 caractères.' },
-            { status: 400 }
-          )
-        }
-        await db.session.update({ where: { id: session.id }, data: { title } })
         return NextResponse.json({ ok: true })
       }
 
@@ -759,13 +830,46 @@ export async function POST(
         })
       }
 
+      // v2.7.0 — Sauvegarde v2 AVEC secrets (jetons + PIN haché) pour la
+      // synchronisation serveur ↔ serveur. Jamais exposée au navigateur :
+      // ce format est tiré/poussé par les serveurs eux-mêmes. La demande
+      // doit venir d'une instance qui possède déjà le jeton enseignant.
+      case 'export_sync': {
+        return NextResponse.json(await buildSyncBackup(session))
+      }
+
+      // v2.7.0 — Synchronisation complète avec la version en ligne :
+      // tirer les contributions distantes → fusionner → pousser l'état
+      // complet (miroir exact, mêmes identifiants → aucun doublon,
+      // aucun conflit). Une panne de réseau interrompt la synchronisation,
+      // jamais la séance locale.
+      case 'sync_now': {
+        const remoteUrl = normalizeRemoteUrl(body.remoteUrl)
+        if (!remoteUrl) {
+          return NextResponse.json(
+            { error: 'Adresse de la version en ligne invalide (ex. https://mon-tbl.vercel.app).' },
+            { status: 400 }
+          )
+        }
+        try {
+          const result = await syncNow(session, remoteUrl)
+          return NextResponse.json(result)
+        } catch (e) {
+          if (e instanceof SyncError) {
+            return NextResponse.json({ error: e.message }, { status: 502 })
+          }
+          console.error('sync_now', e)
+          return NextResponse.json({ error: 'Erreur serveur inattendue.' }, { status: 500 })
+        }
+      }
+
       case 'export_backup': {
         // v2.4.0 — Sauvegarde complète de la séance (JSON) : copie hors-ligne
         // de TOUTES les données — questions, cas, équipes, étudiants (avec
         // leurs codes de reprise), réponses, réclamations, évaluations.
         // À télécharger avant chaque mise à jour de l'application.
         // Les secrets (PIN haché, jetons enseignant/étudiants) sont exclus.
-        const [teams, students, questions, cases, answers, appeals, appAnswers, peerEvals, saiItems, saiResponses, alerts] =
+        const [teams, students, questions, cases, answers, appeals, appAnswers, peerEvals, saiItems, saiResponses] =
           await Promise.all([
             db.team.findMany({
               where: { sessionId: session.id },
@@ -816,19 +920,10 @@ export async function POST(
               where: { student: { sessionId: session.id } },
               orderBy: { createdAt: 'asc' },
             }),
-            // v2.7.0 : signalements anti-capture inclus dans la sauvegarde —
-            // la restauration (téléversement) retrouve ainsi TOUTES les
-            // données, y compris le suivi de suspicion de captures.
-            db.alertEvent.findMany({
-              where: { student: { sessionId: session.id } },
-              orderBy: { createdAt: 'asc' },
-            }),
           ])
         return NextResponse.json({
           format: 'tbl-live-sauvegarde',
-          // version 2 : ajout du bloc « alerts » (v1 = sans signalements,
-          // toujours accepté à l'importation)
-          version: 2,
+          version: 1,
           exportedAt: new Date().toISOString(),
           session: {
             code: session.code,
@@ -850,8 +945,6 @@ export async function POST(
           // v2.6.0 : questionnaire TBL-SAI — items et réponses
           saiItems,
           saiResponses,
-          // v2.7.0 : signalements anti-capture
-          alerts,
         })
       }
 

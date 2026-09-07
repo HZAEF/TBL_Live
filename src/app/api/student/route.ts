@@ -35,6 +35,48 @@ export async function GET(req: NextRequest) {
     const session = student.session
     const status = session.status
 
+    // v2.7.0 — Écran d'attente AVANT le feedback : tant que l'enseignant
+    // n'a pas cliqué « Lancer le feedback », AUCUNE donnée de résultats
+    // n'est envoyée à l'étudiant (ni questions, ni réponses, ni
+    // statistiques) : rien à capturer d'écran, l'attention reste sur le
+    // tableau. Le payload minimal ne contient que l'en-tête habituel.
+    if (status === 'feedback' && !session.feedbackReady) {
+      const teamMembersWaiting = student.teamId
+        ? await db.student.findMany({
+            where: { teamId: student.teamId },
+            orderBy: { createdAt: 'asc' },
+            select: { id: true, name: true },
+          })
+        : []
+      return NextResponse.json({
+        session: {
+          code: session.code,
+          title: session.title,
+          status,
+          phaseStartedAt: session.phaseStartedAt,
+          iratMinutes: session.iratMinutes,
+          revealed: session.revealed,
+          feedbackReady: false,
+        },
+        me: {
+          id: student.id,
+          name: student.name,
+          recoveryCode: student.recoveryCode,
+          saiCompletedAt: student.saiCompletedAt ? student.saiCompletedAt.toISOString() : null,
+          team: student.team ? { id: student.team.id, name: student.team.name } : null,
+        },
+        teamMembers: teamMembersWaiting,
+        questions: [],
+        applicationQuestions: [],
+        appCases: [],
+        revealedAppQuestionIds: [],
+        myIratAnswers: [],
+        teamTratAnswers: [],
+        myAppeals: [],
+        teamAppAnswers: [],
+      })
+    }
+
     const [teamMembers, ratQuestions, appQuestions, cases, myIratAnswers, teamTratAnswers, myAppeals, teamAppAnswers, allStudents, allAppAnswersRaw] =
       await Promise.all([
         student.teamId
@@ -86,6 +128,17 @@ export async function GET(req: NextRequest) {
         }),
       ])
 
+    // v2.7.0 — Cas cliniques lancés : seuls les cas OUVERTS par
+    // l'enseignant (bouton « Lancer le cas clinique N ») sont envoyés
+    // aux étudiants — énoncé, questions et réponses des autres équipes
+    // des cas non lancés ne quittent jamais le serveur. Les étudiants
+    // voient une page d'attente neutre entre chaque cas, pour que
+    // l'enseignant puisse expliquer chaque cas séparément.
+    const openedCaseIds = new Set(cases.filter((c) => c.opened).map((c) => c.id))
+    const accessibleAppQuestions = appQuestions.filter(
+      (q) => !q.caseId || openedCaseIds.has(q.caseId)
+    )
+
     const mapQuestion = (
       q: (typeof ratQuestions)[number] | (typeof appQuestions)[number],
       withCorrect: boolean
@@ -108,11 +161,13 @@ export async function GET(req: NextRequest) {
     // ----- Révélation automatique par question d'application -----
     // Une question est révélée dès que toutes les équipes actives (au moins
     // un étudiant) y ont répondu, ou si l'enseignant force la révélation.
+    // v2.7.0 : calcul limité aux questions accessibles (cas lancés) — les
+    // questions d'un cas non lancé ne peuvent pas recevoir de réponses.
     const activeTeamIds = [
       ...new Set(allStudents.filter((s) => s.teamId).map((s) => s.teamId as string)),
     ]
     const revealedAppQuestionIds = computeRevealedAppQuestionIds({
-      appQuestionIds: appQuestions.map((q) => q.id),
+      appQuestionIds: accessibleAppQuestions.map((q) => q.id),
       activeTeamIds,
       appAnswers: allAppAnswersRaw.map((a) => ({ teamId: a.teamId, questionId: a.questionId })),
       forcedReveal: session.revealed,
@@ -132,6 +187,7 @@ export async function GET(req: NextRequest) {
         phaseStartedAt: session.phaseStartedAt,
         iratMinutes: session.iratMinutes,
         revealed: session.revealed,
+        feedbackReady: session.feedbackReady,
       },
       me: {
         id: student.id,
@@ -144,8 +200,17 @@ export async function GET(req: NextRequest) {
       },
       teamMembers,
       questions: ratQuestions.map((q) => mapQuestion(q, revealCorrect)),
-      applicationQuestions: appQuestions.map((q) => mapQuestion(q, revealAppCorrect(q.id))),
-      appCases: cases.map((c) => ({ id: c.id, title: c.title, intro: c.intro, order: c.order })),
+      // v2.7.0 : seules les questions des cas LANCÉS sont envoyées.
+      applicationQuestions: accessibleAppQuestions.map((q) => mapQuestion(q, revealAppCorrect(q.id))),
+      // v2.7.0 : tous les cas sont listés (sélecteur + page d'attente)
+      // mais le titre et l'énoncé d'un cas non lancé ne sont PAS envoyés.
+      appCases: cases.map((c) => ({
+        id: c.id,
+        title: c.opened ? c.title : null,
+        intro: c.opened ? c.intro : null,
+        order: c.order,
+        opened: c.opened,
+      })),
       revealedAppQuestionIds,
       myIratAnswers: myIratAnswers.map((a) => ({
         questionId: a.questionId,
@@ -166,11 +231,17 @@ export async function GET(req: NextRequest) {
         text: a.text,
         status: a.status,
       })),
-      teamAppAnswers: teamAppAnswers.map((a) => ({
-        questionId: a.questionId,
-        choice: a.choice,
-        text: a.text,
-      })),
+      // v2.7.0 : réponses de mon équipe limitées aux questions accessibles.
+      teamAppAnswers: (() => {
+        const accessibleQIds = new Set(accessibleAppQuestions.map((q) => q.id))
+        return teamAppAnswers
+          .filter((a) => accessibleQIds.has(a.questionId))
+          .map((a) => ({
+            questionId: a.questionId,
+            choice: a.choice,
+            text: a.text,
+          }))
+      })(),
     }
 
     // ----- Phase réclamations : bouton « pas de réclamation » + progression -----
@@ -183,8 +254,9 @@ export async function GET(req: NextRequest) {
     }
 
     // ----- Phase application : progression des équipes par question -----
+    // v2.7.0 : limitée aux questions accessibles (cas lancés).
     if (status === 'application') {
-      response.appAnswerProgress = appQuestions.map((q) => ({
+      response.appAnswerProgress = accessibleAppQuestions.map((q) => ({
         questionId: q.id,
         answered: allAppAnswersRaw.filter((a) => a.questionId === q.id).length,
         total: activeTeamIds.length,

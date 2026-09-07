@@ -12,7 +12,9 @@ import {
   Eye,
   EyeOff,
   Download,
+  Lock,
   LogOut,
+  Play,
   RefreshCw,
   CopyPlus,
   Dices,
@@ -47,7 +49,17 @@ import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import { useI18n, formatDate } from '@/lib/i18n'
 import { Countdown, ElapsedSince, InfoCard, PhaseBadge, choiceLetter } from './shared'
-import { TeamsTab, QuestionsTab, ResultsTab, AppealsTab, SignalementsTab, QuestionnaireTab, ConfigurationsTab, exportCsv } from './teacher-tabs'
+import {
+  TeamsTab,
+  QuestionsTab,
+  ResultsTab,
+  AppealsTab,
+  SignalementsTab,
+  QuestionnaireTab,
+  ConfigurationsTab,
+  readSyncConfig,
+  exportXlsx,
+} from './teacher-tabs'
 import { StatsTab } from './stats-tab'
 
 export function TeacherDashboard({
@@ -82,8 +94,8 @@ export function TeacherDashboard({
   const [dupPin, setDupPin] = useState('')
   const [duplicating, setDuplicating] = useState(false)
   // v2.4.0 : sauvegarde complète (JSON) — copie hors-ligne de toutes les
-  // données de la séance, à télécharger avant chaque mise à jour.
-  const [backingUp, setBackingUp] = useState(false)
+  // données de la séance. v2.7.0 : le bouton vit dans l'onglet
+  // « Configurations » (plus ici).
   const { t } = useI18n()
 
   useEffect(() => {
@@ -147,36 +159,32 @@ export function TeacherDashboard({
     }
   }
 
-  // Sauvegarde complète : télécharge un fichier JSON contenant questions,
-  // cas, équipes, étudiants, réponses, réclamations et évaluations.
-  const doBackup = async () => {
-    setBackingUp(true)
-    try {
-      const res = await api<Record<string, unknown>>(`/api/sessions/${code}/manage`, {
-        method: 'POST',
-        body: JSON.stringify({ token, action: 'export_backup' }),
-      })
-      const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `sauvegarde-tbl-${code}.json`
-      a.click()
-      URL.revokeObjectURL(url)
-      toast({ title: t('Fichier de sauvegarde téléchargé.') })
-    } catch (e) {
-      toast({
-        title: t('Action impossible'),
-        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
-        variant: 'destructive',
-      })
-    } finally {
-      setBackingUp(false)
-    }
-  }
+  // Sauvegarde complète : déplacée dans l'onglet « Configurations »
+  // (v2.7.0) — la fonction doBackup vit maintenant dans teacher-tabs.
 
   const ratQs = useMemo(() => data?.questions.filter((q) => q.phase === 'rat') ?? [], [data])
   const appQs = useMemo(() => data?.questions.filter((q) => q.phase === 'application') ?? [], [data])
+
+  // v2.7.0 — Synchronisation automatique Internet ↔ réseau local :
+  // toutes les 30 secondes pendant que ce tableau de bord est ouvert
+  // (réglage de l'onglet Configurations). Silencieuse : une coupure réseau
+  // n'affiche rien — la séance continue et la date de dernière
+  // synchronisation (onglet Configurations) reflète l'état réel. Le tableau
+  // de bord se rafraîchit tout seul (2,5 s) après chaque synchronisation.
+  // NB : déclaré AVANT les retours anticipés (règle des hooks React).
+  useEffect(() => {
+    if (!data?.session.code || data.session.deletedAt) return
+    const sessionCode = data.session.code
+    const id = setInterval(() => {
+      const cfg = readSyncConfig(sessionCode)
+      if (!cfg?.auto || !cfg.url || document.hidden) return
+      api(`/api/sessions/${sessionCode}/manage`, {
+        method: 'POST',
+        body: JSON.stringify({ token, action: 'sync_now', remoteUrl: cfg.url }),
+      }).catch(() => undefined)
+    }, 30_000)
+    return () => clearInterval(id)
+  }, [data?.session.code, data?.session.deletedAt, token])
 
   if (loading && !data) {
     return (
@@ -247,9 +255,6 @@ export function TeacherDashboard({
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            {/* v2.7.0 : le bouton « Sauvegarder » (téléchargement de la séance)
-                a DÉPLACÉ dans l’onglet « Configurations », avec son pendant
-                « Téléverser ». L’en-tête reste consacré aux actions globales. */}
             <Button
               variant="outline"
               size="sm"
@@ -418,8 +423,8 @@ export function TeacherDashboard({
             )}
           </TabsTrigger>
           {/* v2.7.0 : rubrique « Configurations » — paramètres de la séance
-              (titre, durée), mode réseau local, téléchargement/téléversement
-              du fichier de séance et exclusion d’un étudiant. */}
+              (titre, PIN, durée), sauvegarde/téléversement, exclusion d'un
+              étudiant et synchronisation Internet ↔ réseau local. */}
           <TabsTrigger value="config" className="flex-1 px-3 py-2 sm:flex-none">
             {t('Configurations')}
           </TabsTrigger>
@@ -454,14 +459,11 @@ export function TeacherDashboard({
         <TabsContent value="alerts" className="mt-4">
           <SignalementsTab data={data} />
         </TabsContent>
+        {/* v2.7.0 : Configurations — tout ce qui n'est ni questions, ni
+            questionnaire, ni équipes : paramètres, sauvegarde, transfert,
+            exclusion d'étudiant, synchronisation. */}
         <TabsContent value="config" className="mt-4">
-          <ConfigurationsTab
-            data={data}
-            manage={manage}
-            onBackup={() => void doBackup()}
-            backupBusy={backingUp}
-            onOpenSession={onOpenSession}
-          />
+          <ConfigurationsTab data={data} manage={manage} token={token} refresh={refresh} />
         </TabsContent>
       </Tabs>
 
@@ -517,7 +519,31 @@ export function TeacherDashboard({
             <AlertDialogAction
               className="bg-emerald-600 hover:bg-emerald-700"
               onClick={async () => {
-                if (pendingPhase) await manage('set_phase', { phase: pendingPhase })
+                if (pendingPhase) {
+                  await manage('set_phase', { phase: pendingPhase })
+                  // v2.7.0 : fin de séance → synchronisation FINALE avec la
+                  // version en ligne (si une adresse est configurée) : tous
+                  // les résultats partent sur Internet, sans action
+                  // supplémentaire de l'enseignant.
+                  if (pendingPhase === 'finished') {
+                    const cfg = readSyncConfig(code)
+                    if (cfg?.url) {
+                      api(`/api/sessions/${code}/manage`, {
+                        method: 'POST',
+                        body: JSON.stringify({ token, action: 'sync_now', remoteUrl: cfg.url }),
+                      })
+                        .then(() => refresh())
+                        .catch(() =>
+                          toast({
+                            title: t('Synchronisation finale impossible'),
+                            description: t(
+                              'La séance est terminée et sauvegardée ici. Relancez la synchronisation depuis l’onglet « Configurations » quand la connexion reviendra.'
+                            ),
+                          })
+                        )
+                    }
+                  }
+                }
                 setPendingPhase(null)
               }}
             >
@@ -1175,6 +1201,43 @@ function OverviewPanel({
             'Le tableau ci-dessous vous montre les questions les moins bien comprises (en rouge) — c’est là que votre mini-cours sera le plus utile.'
           )}
         </InfoCard>
+
+        {/* v2.7.0 : écran d'attente des étudiants — les résultats n'apparaissent
+            sur leur téléphone QUE lorsque vous lancez le feedback (entre les
+            réclamations et ce moment, ils voient une page neutre : rien à
+            capturer, l'attention reste sur vous). */}
+        <div
+          className={cn(
+            'rounded-2xl border-2 p-5',
+            data.session.feedbackReady
+              ? 'border-emerald-200 bg-emerald-50'
+              : 'border-sky-300 bg-sky-50'
+          )}
+        >
+          {data.session.feedbackReady ? (
+            <p className="flex items-center gap-2 text-sm font-bold text-emerald-800">
+              <Check className="h-5 w-5" />
+              {t('Feedback lancé : les étudiants voient leurs résultats et les réponses correctes.')}
+            </p>
+          ) : (
+            <>
+              <p className="text-sm font-bold text-sky-900">{t('Les étudiants patientent')}</p>
+              <p className="mt-1 text-sm leading-relaxed text-sky-800">
+                {t(
+                  'Leur téléphone affiche une page d’attente neutre : ni notes, ni réponses correctes, rien à capturer d’écran. Commentez les résultats avec la classe, puis lancez le feedback quand vous êtes prêt — tout apparaîtra d’un coup sur leur écran.'
+                )}
+              </p>
+              <Button
+                className="mt-3 h-12 w-full bg-sky-600 text-base hover:bg-sky-700"
+                onClick={() => manage('launch_feedback')}
+              >
+                <Play className="mr-2 h-5 w-5" />
+                {t('Lancer le feedback')}
+              </Button>
+            </>
+          )}
+        </div>
+
         <div className="rounded-2xl border border-stone-200 bg-white p-4">
           <div className="space-y-3">
             {ratQs.map((q, qi) => {
@@ -1252,6 +1315,7 @@ function OverviewPanel({
       ...data.cases.map((c) => ({
         key: c.id,
         title: c.title,
+        opened: c.opened,
         questions: appQs.filter((q) => q.caseId === c.id),
       })),
       ...(appQs.some((q) => !q.caseId)
@@ -1259,6 +1323,7 @@ function OverviewPanel({
             {
               key: 'libres',
               title: t('Exercices d’application (ancien format)'),
+              opened: true,
               questions: appQs.filter((q) => !q.caseId),
             },
           ]
@@ -1278,13 +1343,71 @@ function OverviewPanel({
           )}
         </p>
 
+        {/* v2.7.0 : lancement des cas cliniques UN PAR UN. Chaque cas reste
+            INVISIBLE des étudiants (page d'attente neutre : ni énoncé, ni
+            questions) jusqu'à son lancement — expliquez le cas précédent à
+            voix haute, puis ouvrez le suivant quand la classe est prête. */}
+        {caseGroups.some((g) => g.key !== 'libres') && (
+          <div className="rounded-2xl border-2 border-lime-300 bg-lime-50 p-4">
+            <p className="text-sm font-bold text-lime-900">
+              {t('Lancement des cas cliniques')}
+            </p>
+            <p className="mt-0.5 text-xs leading-relaxed text-lime-800">
+              {t(
+                'Tant qu’un cas n’est pas lancé, les étudiants voient une page d’attente : aucune avance possible. Un cas lancé reste accessible jusqu’au bout de la séance.'
+              )}
+            </p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              {caseGroups.map((g, gi) =>
+                g.key === 'libres' ? null : (
+                  <Button
+                    key={g.key}
+                    className={cn(
+                      'h-12 text-sm font-semibold',
+                      g.opened
+                        ? 'border border-lime-400 bg-white text-lime-700 hover:bg-lime-100'
+                        : 'bg-lime-600 text-white hover:bg-lime-700'
+                    )}
+                    variant={g.opened ? 'outline' : 'default'}
+                    onClick={() => manage('open_case', { caseId: g.key })}
+                    disabled={g.opened}
+                  >
+                    {g.opened ? (
+                      <>
+                        <Check className="mr-2 h-4 w-4" />
+                        {t('Cas clinique {n} lancé', { n: gi + 1 })}
+                      </>
+                    ) : (
+                      <>
+                        <Play className="mr-2 h-4 w-4" />
+                        {t('Lancer le cas clinique {n}', { n: gi + 1 })}
+                      </>
+                    )}
+                  </Button>
+                )
+              )}
+            </div>
+          </div>
+        )}
+
         {caseGroups.map((g, gi) => (
           <section key={g.key} className="space-y-2">
-            <h3 className="flex items-center gap-2 text-sm font-bold text-stone-800">
+            <h3 className="flex flex-wrap items-center gap-2 text-sm font-bold text-stone-800">
               <span className="rounded-full bg-lime-600 px-2.5 py-0.5 text-xs font-bold text-white">
                 {t('Application {n}', { n: gi + 1 })}
               </span>
               {g.title}
+              {/* v2.7.0 : état de lancement du cas */}
+              {g.key !== 'libres' &&
+                (g.opened ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-lime-100 px-2 py-0.5 text-[10px] font-bold text-lime-700">
+                    <Check className="h-3 w-3" /> {t('lancé')}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[10px] font-bold text-stone-600">
+                    <Lock className="h-3 w-3" /> {t('en attente de lancement')}
+                  </span>
+                ))}
             </h3>
             {g.questions.map((q, qi) => {
               const answeredTeams = new Set(
@@ -1398,6 +1521,10 @@ function OverviewPanel({
             />
           </div>
         </div>
+
+        {/* v2.7.0 : équipes qui n'ont PAS complètement évalué leurs pairs
+            — pour les solliciter avant la fin de la phase. */}
+        <PeerCompletenessCard data={data} />
       </div>
     )
   }
@@ -1433,17 +1560,102 @@ function OverviewPanel({
         </div>
       </div>
       <Button
-        variant="outline"
-        className="h-12 w-full border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-        onClick={() => exportCsv(data, ratQs, appQs)}
+        className="h-12 w-full bg-emerald-600 text-white hover:bg-emerald-700"
+        onClick={() => exportXlsx(data, ratQs, appQs)}
       >
         <Download className="mr-2 h-4 w-4" />
-        {t('Exporter tous les résultats (CSV pour Excel)')}
+        {t('Exporter les résultats — Excel (3 feuilles)')}
       </Button>
+      <p className="text-xs leading-relaxed text-stone-500">
+        {t(
+          'Un seul fichier Excel : feuille 1 « Résultats », feuille 2 « Docimologie », feuille 3 « Questionnaire ». Les exports CSV restent disponibles dans leurs rubriques : « Résultats », « Statistiques » et « Questionnaire ».'
+        )}
+      </p>
       <p className="text-xs text-stone-500">
         {t(
           'Astuce : pour refaire une séance similaire, créez une nouvelle séance et reprenez vos questions.'
         )}
+      </p>
+    </div>
+  )
+}
+
+// v2.7.0 — Carte « équipes à solliciter » : équipes dont un ou plusieurs
+// membres n'ont pas encore évalué TOUS leurs coéquipiers. Affichée en phase
+// d'évaluation par les pairs (rubrique 7 du déroulé) : l'enseignant voit
+// immédiatement qui relancer pour compléter.
+function PeerCompletenessCard({ data }: { data: DashboardDTO }) {
+  const { t } = useI18n()
+  const rows = data.teams
+    .map((tm) => ({
+      team: tm,
+      members: data.students.filter((s) => s.teamId === tm.id),
+    }))
+    .filter(({ members }) => members.length > 1)
+    .map(({ team, members }) => {
+      const details = members.map((m) => {
+        const teammateIds = members.filter((x) => x.id !== m.id).map((x) => x.id)
+        const done = data.peerEvals.filter(
+          (e) => e.evaluatorId === m.id && teammateIds.includes(e.evaluatedId)
+        ).length
+        return { name: m.name, done, expected: teammateIds.length }
+      })
+      return {
+        team,
+        details,
+        complete: details.every((d) => d.done >= d.expected),
+      }
+    })
+
+  if (rows.length === 0) return null
+  const incomplete = rows.filter((r) => !r.complete)
+
+  if (incomplete.length === 0) {
+    return (
+      <div className="rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-4 text-center">
+        <p className="flex items-center justify-center gap-2 text-sm font-bold text-emerald-800">
+          <Check className="h-5 w-5" />
+          {t('Toutes les équipes ont complété leurs évaluations de pairs.')}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-4">
+      <p className="text-sm font-bold text-amber-900">
+        {t('Équipes à solliciter ({n})', { n: incomplete.length })}
+      </p>
+      <p className="mt-0.5 text-sm text-amber-800">
+        {t(
+          'Ces étudiants n’ont pas encore évalué tous leurs coéquipiers — invitez-les à terminer avant la fin de la phase.'
+        )}
+      </p>
+      <div className="mt-3 space-y-2">
+        {incomplete.map(({ team, details }) => (
+          <div key={team.id} className="rounded-xl bg-white p-3">
+            <p className="text-sm font-bold text-stone-800">{team.name}</p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {details
+                .filter((d) => d.done < d.expected)
+                .map((d) => (
+                  <span
+                    key={d.name}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800"
+                  >
+                    <Users className="h-3 w-3" />
+                    {d.name}
+                    <span className="font-mono">
+                      {d.done}/{d.expected}
+                    </span>
+                  </span>
+                ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] text-amber-700">
+        {t('Compteur : évaluations données par l’étudiant sur ses coéquipiers.')}
       </p>
     </div>
   )

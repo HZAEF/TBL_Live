@@ -34,7 +34,7 @@ export async function GET(
       )
     }
 
-    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals, alertEvents, saiItems, saiResponses, saiComments] =
+    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals, alertEvents, saiItems, saiResponses, saiComments, saiDetailedResponses] =
       await Promise.all([
         db.question.findMany({
           where: { sessionId: session.id },
@@ -117,14 +117,20 @@ export async function GET(
         }),
         db.saiResponse.findMany({
           where: { student: { sessionId: session.id } },
-          // v2.7.0 : studentId ajouté — l'export Excel (3ᵈ feuille)
-          // calcule les moyennes de sous-échelles PAR étudiant.
-          select: { studentId: true, itemId: true, value: true },
+          select: { itemId: true, value: true },
         }),
         db.student.findMany({
           where: { sessionId: session.id, saiComment: { not: null } },
           orderBy: [{ saiCompletedAt: 'asc' }],
           select: { name: true, saiComment: true, saiCompletedAt: true },
+        }),
+        // v2.7.0 : réponses individuelles au questionnaire (matrice
+        // étudiant × item pour l'export CSV/Excel, onglet Questionnaire
+        // et feuille 3 du classeur Excel).
+        db.saiResponse.findMany({
+          where: { student: { sessionId: session.id } },
+          orderBy: { createdAt: 'asc' },
+          select: { studentId: true, itemId: true, value: true },
         }),
       ])
 
@@ -152,6 +158,10 @@ export async function GET(
         iratMinutes: live.iratMinutes,
         phaseStartedAt: live.phaseStartedAt,
         revealed: live.revealed,
+        // v2.7.0 : écran d'attente avant le feedback + date de dernière
+        // synchronisation avec la version en ligne (onglet Configurations).
+        feedbackReady: live.feedbackReady,
+        syncedAt: live.syncedAt ? live.syncedAt.toISOString() : null,
         createdAt: live.createdAt,
         // Corbeille (null = séance active) et purge des données étudiantes
         deletedAt: live.deletedAt,
@@ -171,6 +181,9 @@ export async function GET(
         title: c.title,
         intro: c.intro,
         order: c.order,
+        // v2.7.0 : cas lancé par l'enseignant (bouton « Lancer le cas
+        // clinique N ») — false = étudiants en page d'attente.
+        opened: c.opened,
       })),
       teams: teams.map((t) => ({
         id: t.id,
@@ -200,6 +213,9 @@ export async function GET(
       // v2.6.0 — questionnaire TBL-SAI : items + agrégats par item +
       // commentaires. Les moyennes de sous-échelles sont calculées côté
       // client (inversion des items négatifs, libellés i18n).
+      // v2.7.0 — réponses individuelles (matrice étudiant × item des
+      // exports CSV/Excel du questionnaire).
+      saiResponses: saiDetailedResponses,
       saiItems: saiItems.map((it) => ({
         id: it.id,
         subscale: it.subscale as 'accountability' | 'preference' | 'satisfaction',
@@ -223,14 +239,6 @@ export async function GET(
           createdAt: (s.saiCompletedAt ?? new Date()).toISOString(),
         })),
       },
-      // v2.7.0 — réponses brutes du questionnaire (étudiant × item) :
-      // l'export Excel calcule les moyennes de sous-échelles par étudiant.
-      // Volume borné : au plus 33 items × nombre d'étudiants.
-      saiResponses: saiResponses.map((r) => ({
-        studentId: r.studentId,
-        itemId: r.itemId,
-        value: r.value,
-      })),
     })
   } catch (e) {
     console.error('GET /api/sessions/[code]/dashboard', e)

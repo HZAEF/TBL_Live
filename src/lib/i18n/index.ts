@@ -2,7 +2,7 @@
 // TBL Live — Internationalisation (i18n)
 // 9 langues : français (défaut, = clé), anglais, espagnol,
 // allemand, chinois, russe, arabe (droite-à-gauche),
-// italien, turc (v2.7.0).
+// italien et turc (v2.7.0).
 // Principe : la clé du dictionnaire EST le texte français ;
 // en français la clé est renvoyée telle quelle (identité).
 // Une traduction manquante retombe proprement sur le français.
