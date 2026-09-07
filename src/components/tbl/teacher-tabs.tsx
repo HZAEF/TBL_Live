@@ -1,7 +1,21 @@
 'use client'
 
-import { useState } from 'react'
-import { Check, Download, Plus, Save, Trash2, Users, Wand2, X } from 'lucide-react'
+import { useRef, useState } from 'react'
+import {
+  Check,
+  Download,
+  KeyRound,
+  Plus,
+  Save,
+  ShieldAlert,
+  Trash2,
+  Upload,
+  UserX,
+  Users,
+  Wand2,
+  Wifi,
+  X,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,10 +27,25 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import { t, useI18n, formatDate } from '@/lib/i18n'
 import type { DashboardDTO } from '@/lib/tbl-types'
+import { suggestPin } from '@/lib/tbl-types'
 import { gradeForStudent, fmtNote } from '@/lib/grades'
+import { SAI_SUBSCALES, SAI_SUBSCALE_INFO, saiItemText } from '@/lib/sai'
+import { api } from '@/lib/tbl-client'
+import { exportXlsx } from '@/lib/export-xlsx'
 import { choiceLetter } from './shared'
 import { QuestionEditor, emptyQuestion } from './question-editor'
 import type { DraftQuestion } from '@/lib/tbl-types'
@@ -28,6 +57,7 @@ type ManageFn = (action: string, extra?: Record<string, unknown>) => Promise<boo
 export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageFn }) {
   const [teamCount, setTeamCount] = useState(String(data.teams.length))
   const { toast } = useToast()
+  const { t } = useI18n()
   const unassigned = data.students.filter((s) => !s.teamId)
 
   return (
@@ -35,7 +65,7 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
       <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-stone-200 bg-white p-4">
         <div>
           <Label htmlFor="team-count" className="text-sm">
-            Nombre d&apos;équipes
+            {t('Nombre d’équipes')}
           </Label>
           <Input
             id="team-count"
@@ -46,7 +76,7 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
             onChange={(e) => setTeamCount(e.target.value)}
             className="mt-1 h-10 w-24"
           />
-          <p className="mt-1 text-xs text-stone-500">Entre 2 et 50.</p>
+          <p className="mt-1 text-xs text-stone-500">{t('Entre 2 et 50.')}</p>
         </div>
         <Button
           variant="outline"
@@ -57,7 +87,7 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
             })
           }
         >
-          Appliquer
+          {t('Appliquer')}
         </Button>
         <Button
           variant="outline"
@@ -65,26 +95,30 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
           onClick={async () => {
             if (
               window.confirm(
-                'Répartir automatiquement tous les étudiants sans équipe ? (À faire idéalement avant les tests)'
+                t(
+                  'Répartir automatiquement tous les étudiants sans équipe ? (À faire idéalement avant les tests)'
+                )
               )
             ) {
               const ok = await manage('auto_assign')
-              if (ok) toast({ title: 'Répartition effectuée' })
+              if (ok) toast({ title: t('Répartition effectuée') })
             }
           }}
         >
           <Wand2 className="mr-2 h-4 w-4" />
-          Répartir automatiquement {unassigned.length > 0 && `(${unassigned.length} sans équipe)`}
+          {t('Répartir automatiquement')}
+          {unassigned.length > 0 &&
+            ` (${t('{n} sans équipe', { n: unassigned.length })})`}
         </Button>
       </div>
 
       <div className="grid gap-3 lg:grid-cols-2">
-        {data.teams.map((t) => {
-          const members = data.students.filter((s) => s.teamId === t.id)
+        {data.teams.map((tm) => {
+          const members = data.students.filter((s) => s.teamId === tm.id)
           return (
-            <div key={t.id} className="rounded-2xl border border-stone-200 bg-white p-4">
+            <div key={tm.id} className="rounded-2xl border border-stone-200 bg-white p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
-                <TeamNameEditor team={t} manage={manage} />
+                <TeamNameEditor team={tm} manage={manage} />
                 <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 text-xs font-semibold text-stone-600">
                   <Users className="h-3.5 w-3.5" />
                   {members.length}
@@ -92,7 +126,7 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
               </div>
               <div className="space-y-2">
                 {members.length === 0 && (
-                  <p className="text-sm text-stone-400">Aucun membre (pour l&apos;instant)</p>
+                  <p className="text-sm text-stone-400">{t('Aucun membre (pour l’instant)')}</p>
                 )}
                 {members.map((m) => (
                   <div
@@ -104,7 +138,9 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
                       {m.recoveryCode && (
                         <span
                           className="ml-2 font-mono text-[11px] font-normal text-stone-400"
-                          title="Code de reprise personnel de l’étudiant (à lui redonner s’il l’a perdu)"
+                          title={t(
+                            'Code personnel de l’étudiant (à lui redonner s’il l’a perdu)'
+                          )}
                         >
                           {m.recoveryCode}
                         </span>
@@ -124,7 +160,7 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="none">Sans équipe</SelectItem>
+                          <SelectItem value="none">{t('Sans équipe')}</SelectItem>
                           {data.teams.map((tt) => (
                             <SelectItem key={tt.id} value={tt.id}>
                               {tt.name}
@@ -139,13 +175,16 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
                         onClick={() => {
                           if (
                             window.confirm(
-                              `Retirer ${m.name} de la séance ? Ses réponses seront supprimées.`
+                              t(
+                                'Retirer {name} de la séance ? Ses réponses seront supprimées.',
+                                { name: m.name }
+                              )
                             )
                           ) {
                             manage('remove_student', { studentId: m.id })
                           }
                         }}
-                        aria-label={`Retirer ${m.name}`}
+                        aria-label={t('Retirer {name}', { name: m.name })}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -161,11 +200,13 @@ export function TeamsTab({ data, manage }: { data: DashboardDTO; manage: ManageF
       {unassigned.length > 0 && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
           <p className="text-sm font-bold text-amber-900">
-            {unassigned.length} étudiant(s) sans équipe
+            {t('{n} étudiant(s) sans équipe', { n: unassigned.length })}
           </p>
           <p className="mt-1 text-sm text-amber-800">
-            {unassigned.map((s) => s.name).join(', ')} — utilisez le menu « Sans équipe » ci-dessus
-            ou la répartition automatique.
+            {unassigned.map((s) => s.name).join(', ')} —{' '}
+            {t(
+              'utilisez le menu « Sans équipe » ci-dessus ou la répartition automatique.'
+            )}
           </p>
         </div>
       )}
@@ -205,6 +246,7 @@ function TeamNameEditor({
 // ================= Onglet QUESTIONS =================
 
 export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: ManageFn }) {
+  const { t } = useI18n()
   const hasAnswers =
     data.iratAnswers.length > 0 || data.tratAnswers.length > 0 || data.appAnswers.length > 0
   const [newQ, setNewQ] = useState<DraftQuestion | null>(null)
@@ -217,16 +259,21 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
     <div className="space-y-4">
       {hasAnswers && (
         <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-          Des réponses existent déjà ({data.iratAnswers.length} iRAT, {data.tratAnswers.length}{' '}
-          tRAT, {data.appAnswers.length} application). Modifier ou supprimer des questions peut
-          rendre les résultats incohérents — à éviter en cours de séance.
+          {t(
+            'Des réponses existent déjà ({a} iRAT, {b} tRAT, {c} application). Modifier ou supprimer des questions peut rendre les résultats incohérents — à éviter en cours de séance.',
+            {
+              a: data.iratAnswers.length,
+              b: data.tratAnswers.length,
+              c: data.appAnswers.length,
+            }
+          )}
         </p>
       )}
 
       <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-600">
-        Les questions sont réparties en deux listes indépendantes : les questions de préparation
-        (utilisées pour l&apos;iRAT <em>puis</em> le tRAT) et les cas cliniques d&apos;application
-        (affichés un par un aux équipes, avec révélation automatique des réponses).
+        {t(
+          'Les questions sont réparties en deux listes indépendantes : les questions de préparation (utilisées pour l’iRAT puis le tRAT) et les cas cliniques d’application (affichés un par un aux équipes, avec révélation automatique des réponses).'
+        )}
       </p>
 
       {/* --- Questions iRAT / tRAT --- */}
@@ -235,11 +282,13 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
           <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-xs font-bold text-white">
             iRAT / tRAT
           </span>
-          {ratQs.length} question{ratQs.length > 1 ? 's' : ''} de préparation
+          {t('{n} question(s) de préparation', { n: ratQs.length })}
         </h3>
         {ratQs.length === 0 && (
           <p className="rounded-2xl border border-dashed border-amber-300 bg-amber-50/50 p-4 text-center text-sm text-stone-500">
-            Aucune question de préparation. Elles sont indispensables pour lancer l&apos;iRAT.
+            {t(
+              'Aucune question de préparation. Elles sont indispensables pour lancer l’iRAT.'
+            )}
           </p>
         )}
         {ratQs.map((q, i) => (
@@ -253,12 +302,16 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
           <span className="rounded-full bg-lime-600 px-2.5 py-0.5 text-xs font-bold text-white">
             Application
           </span>
-          {data.cases.length} cas clinique{data.cases.length > 1 ? 's' : ''} · {appQs.filter((q) => q.caseId).length} QCU
+          {t('{n} cas clinique(s) · {m} QCU', {
+            n: data.cases.length,
+            m: appQs.filter((q) => q.caseId).length,
+          })}
         </h3>
         {data.cases.length === 0 && (
           <p className="rounded-2xl border border-dashed border-lime-300 bg-lime-50/50 p-4 text-center text-sm text-stone-500">
-            Aucun cas clinique pour le moment. Chaque cas contient un énoncé et 3 à 5 QCU,
-            affichés un par un aux équipes.
+            {t(
+              'Aucun cas clinique pour le moment. Chaque cas contient un énoncé et 3 à 5 QCU, affichés un par un aux équipes.'
+            )}
           </p>
         )}
         {data.cases.map((c, ci) => (
@@ -277,24 +330,26 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
           disabled={data.cases.length >= 20}
           onClick={() => {
             if (
-              window.confirm(
-                'Ajouter un nouveau cas clinique (énoncé + QCU) ?'
-              )
+              window.confirm(t('Ajouter un nouveau cas clinique (énoncé + QCU) ?'))
             ) {
-              manage('add_case', { title: `Cas clinique ${data.cases.length + 1}`, intro: '' })
+              manage('add_case', {
+                title: t('Cas clinique {n}', { n: data.cases.length + 1 }),
+                intro: '',
+              })
             }
           }}
         >
           <Plus className="mr-2 h-4 w-4" />
-          Ajouter un cas clinique
+          {t('Ajouter un cas clinique')}
         </Button>
 
         {/* Ancien format : exercices libres */}
         {freeAppQs.length > 0 && (
           <div className="space-y-2 rounded-2xl border border-dashed border-stone-300 bg-stone-50/50 p-3">
             <p className="text-xs font-semibold text-stone-500">
-              Exercices d&apos;application isolés (ancien format — affichés ensemble sur une
-              seule page aux étudiants) :
+              {t(
+                'Exercices d’application isolés (ancien format — affichés ensemble sur une seule page aux étudiants) :'
+              )}
             </p>
             {freeAppQs.map((q, i) => (
               <ExistingQuestionEditor key={q.id} index={i} question={q} manage={manage} prefix="Exercice" />
@@ -327,7 +382,7 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
             }}
           >
             <Plus className="mr-2 h-4 w-4" />
-            Ajouter cette question
+            {t('Ajouter cette question')}
           </Button>
         </div>
       ) : (
@@ -340,7 +395,7 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
           }}
         >
           <Plus className="mr-2 h-4 w-4" />
-          Question iRAT / tRAT
+          {t('Question iRAT / tRAT')}
         </Button>
       )}
     </div>
@@ -366,11 +421,14 @@ function CaseEditor({
   const [intro, setIntro] = useState(kase.intro ?? '')
   const [newQ, setNewQ] = useState<DraftQuestion | null>(null)
   const dirty = title !== kase.title || intro !== (kase.intro ?? '')
+  const { t } = useI18n()
 
   return (
     <div className="space-y-2 rounded-2xl border-2 border-lime-200 bg-lime-50/40 p-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-sm font-bold text-stone-800">Application {index + 1}</p>
+        <p className="text-sm font-bold text-stone-800">
+          {t('Application {n}', { n: index + 1 })}
+        </p>
         <Button
           variant="ghost"
           size="icon"
@@ -378,13 +436,16 @@ function CaseEditor({
           onClick={() => {
             if (
               window.confirm(
-                `Supprimer « ${kase.title} » ? Ses ${questions.length} QCU et leurs réponses seront aussi supprimées.`
+                t(
+                  'Supprimer « {title} » ? Ses {n} QCU et leurs réponses seront aussi supprimées.',
+                  { title: kase.title, n: questions.length }
+                )
               )
             ) {
               manage('delete_case', { id: kase.id })
             }
           }}
-          aria-label={`Supprimer le cas ${index + 1}`}
+          aria-label={t('Supprimer le cas {n}', { n: index + 1 })}
         >
           <Trash2 className="h-4 w-4" />
         </Button>
@@ -392,13 +453,13 @@ function CaseEditor({
       <Input
         value={title}
         onChange={(e) => setTitle(e.target.value)}
-        placeholder="Titre du cas (ex. : Cas clinique — Mme A., 62 ans, douleur thoracique)"
+        placeholder={t('Titre du cas (ex. : Cas clinique — Mme A., 62 ans, douleur thoracique)')}
         className="h-10 border-lime-300"
       />
       <Textarea
         value={intro}
         onChange={(e) => setIntro(e.target.value)}
-        placeholder="Énoncé du cas : contexte, patient, données cliniques ou biologiques…"
+        placeholder={t('Énoncé du cas : contexte, patient, données cliniques ou biologiques…')}
         rows={3}
         className="resize-none border-lime-300 text-[15px]"
       />
@@ -409,7 +470,7 @@ function CaseEditor({
           onClick={() => manage('update_case', { id: kase.id, title, intro })}
         >
           <Save className="mr-1.5 h-4 w-4" />
-          Enregistrer le cas
+          {t('Enregistrer le cas')}
         </Button>
       )}
 
@@ -442,7 +503,7 @@ function CaseEditor({
             }}
           >
             <Plus className="mr-2 h-4 w-4" />
-            Ajouter cette QCU au cas
+            {t('Ajouter cette QCU au cas')}
           </Button>
         </div>
       ) : (
@@ -453,12 +514,12 @@ function CaseEditor({
           onClick={() => setNewQ(emptyQuestion('application'))}
         >
           <Plus className="mr-1 h-3.5 w-3.5" />
-          Ajouter une QCU à ce cas
+          {t('Ajouter une QCU à ce cas')}
         </Button>
       )}
       <p className="text-center text-xs text-stone-500">
-        {questions.length} QCU — 3 à 5 conseillées par cas
-        {hasAnswers && ' · des réponses existent déjà'}
+        {t('{n} QCU — 3 à 5 conseillées par cas', { n: questions.length })}
+        {hasAnswers && ` · ${t('des réponses existent déjà')}`}
       </p>
     </div>
   )
@@ -483,6 +544,7 @@ function ExistingQuestionEditor({
     correct: question.correct ?? 0,
     phase: question.phase,
   })
+  const { t } = useI18n()
   const dirty =
     draft.text !== question.text ||
     JSON.stringify(draft.choices) !== JSON.stringify(question.choices) ||
@@ -497,7 +559,11 @@ function ExistingQuestionEditor({
         hidePhaseToggle={hidePhaseToggle || question.caseId !== null}
         prefix={prefix ?? (question.phase === 'application' ? 'Exercice' : 'Question')}
         onDelete={() => {
-          if (window.confirm('Supprimer cette question ? Ses réponses seront aussi supprimées.')) {
+          if (
+            window.confirm(
+              t('Supprimer cette question ? Ses réponses seront aussi supprimées.')
+            )
+          ) {
             manage('delete_question', { id: question.id })
           }
         }}
@@ -509,7 +575,7 @@ function ExistingQuestionEditor({
           onClick={() => manage('update_question', { id: question.id, question: draft })}
         >
           <Save className="mr-1.5 h-4 w-4" />
-          Enregistrer les modifications
+          {t('Enregistrer les modifications')}
         </Button>
       )}
     </div>
@@ -527,10 +593,11 @@ export function ResultsTab({
   ratQs: DashboardDTO['questions']
   appQs: DashboardDTO['questions']
 }) {
+  const { t } = useI18n()
   if (data.students.length === 0) {
     return (
       <p className="rounded-2xl border border-dashed border-stone-300 bg-white p-8 text-center text-sm text-stone-500">
-        Les résultats apparaîtront ici dès que des étudiants auront répondu.
+        {t('Les résultats apparaîtront ici dès que des étudiants auront répondu.')}
       </p>
     )
   }
@@ -541,19 +608,19 @@ export function ResultsTab({
 
       {/* iRAT */}
       {ratQs.length > 0 && (
-        <ResultSection title="Test individuel (iRAT) — 1 point par bonne réponse">
+        <ResultSection title={t('Test individuel (iRAT) — 1 point par bonne réponse')}>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[480px] text-sm">
               <thead>
-                <tr className="border-b border-stone-200 text-left text-xs text-stone-500">
-                  <th className="py-2 pr-3 font-medium">Étudiant</th>
-                  <th className="py-2 pr-3 font-medium">Équipe</th>
+                <tr className="border-b border-stone-200 text-start text-xs text-stone-500">
+                  <th className="py-2 pe-3 font-medium">{t('Étudiant')}</th>
+                  <th className="py-2 pe-3 font-medium">{t('Équipe')}</th>
                   {ratQs.map((_, i) => (
                     <th key={i} className="py-2 px-1.5 text-center font-medium">
                       Q{i + 1}
                     </th>
                   ))}
-                  <th className="py-2 pl-3 text-center font-medium">Total</th>
+                  <th className="py-2 ps-3 text-center font-medium">{t('Total')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -599,31 +666,33 @@ export function ResultsTab({
 
       {/* tRAT */}
       {ratQs.length > 0 && (
-        <ResultSection title="Test en équipe (tRAT) — barème 4 / 2 / 1 / 0 selon la tentative">
+        <ResultSection
+          title={t('Test en équipe (tRAT) — barème 4 / 2 / 1 / 0 selon la tentative')}
+        >
           <div className="overflow-x-auto">
             <table className="w-full min-w-[420px] text-sm">
               <thead>
-                <tr className="border-b border-stone-200 text-left text-xs text-stone-500">
-                  <th className="py-2 pr-3 font-medium">Équipe</th>
+                <tr className="border-b border-stone-200 text-start text-xs text-stone-500">
+                  <th className="py-2 pe-3 font-medium">{t('Équipe')}</th>
                   {ratQs.map((_, i) => (
                     <th key={i} className="py-2 px-1.5 text-center font-medium">
                       Q{i + 1}
                     </th>
                   ))}
-                  <th className="py-2 pl-3 text-center font-medium">Total</th>
+                  <th className="py-2 ps-3 text-center font-medium">{t('Total')}</th>
                 </tr>
               </thead>
               <tbody>
-                {data.teams.map((t) => {
+                {data.teams.map((tm) => {
                   const total = data.tratAnswers
-                    .filter((a) => a.teamId === t.id)
+                    .filter((a) => a.teamId === tm.id)
                     .reduce((sum, a) => sum + a.score, 0)
                   return (
-                    <tr key={t.id} className="border-b border-stone-100">
-                      <td className="py-2 pr-3 font-medium text-stone-800">{t.name}</td>
+                    <tr key={tm.id} className="border-b border-stone-100">
+                      <td className="py-2 pe-3 font-medium text-stone-800">{tm.name}</td>
                       {ratQs.map((q) => {
                         const answers = data.tratAnswers.filter(
-                          (x) => x.questionId === q.id && x.teamId === t.id
+                          (x) => x.questionId === q.id && x.teamId === tm.id
                         )
                         const best = answers.find((a) => a.isCorrect)
                         const score = answers.reduce((sum, a) => sum + a.score, 0)
@@ -639,7 +708,7 @@ export function ResultsTab({
                               <span className="font-bold">{score > 0 ? score : '·'}</span>
                               {attempts > 0 && (
                                 <span className="text-[10px] text-stone-400">
-                                  {best ? `${attempts}ᵉ essai` : 'échoué'}
+                                  {best ? t('{n}ᵉ essai', { n: attempts }) : t('échoué')}
                                 </span>
                               )}
                             </span>
@@ -665,7 +734,9 @@ export function ResultsTab({
 
       {/* Évaluation par les pairs */}
       {data.peerEvals.length > 0 && (
-        <ResultSection title="Évaluation par les pairs — note moyenne reçue (sur 5)">
+        <ResultSection
+          title={t('Évaluation par les pairs — note moyenne reçue (sur 5)')}
+        >
           <div className="space-y-2">
             {data.students.map((s) => {
               const received = data.peerEvals.filter((e) => e.evaluatedId === s.id)
@@ -706,13 +777,23 @@ export function ResultsTab({
         </ResultSection>
       )}
 
+      {/* v2.7.0 : export Excel 3 feuilles (résultats / docimologie /
+          questionnaire TBL-SAI) — bouton principal ; le CSV reste
+          disponible en secours (certains tableurs anciens). */}
+      <Button
+        className="h-12 w-full bg-emerald-600 text-base hover:bg-emerald-700"
+        onClick={() => exportXlsx(data, ratQs, appQs)}
+      >
+        <Download className="mr-2 h-4 w-4" />
+        {t('Exporter les résultats — Excel (3 feuilles)')}
+      </Button>
       <Button
         variant="outline"
-        className="h-12 w-full border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+        className="h-10 w-full border-stone-300 text-stone-600 hover:bg-stone-50"
         onClick={() => exportCsv(data, ratQs, appQs)}
       >
         <Download className="mr-2 h-4 w-4" />
-        Exporter tous les résultats (CSV pour Excel)
+        {t('Exporter tous les résultats (CSV pour Excel)')}
       </Button>
     </div>
   )
@@ -726,25 +807,30 @@ function AppResultsByCase({
   data: DashboardDTO
   appQs: DashboardDTO['questions']
 }) {
+  const { t } = useI18n()
   const caseById = new Map(data.cases.map((c) => [c.id, c]))
   const groups: { label: string; questions: DashboardDTO['questions'] }[] = []
   for (const c of data.cases) {
     const qs = appQs.filter((q) => q.caseId === c.id)
-    if (qs.length > 0) groups.push({ label: `Application ${c.order + 1} — ${c.title}`, questions: qs })
+    if (qs.length > 0)
+      groups.push({
+        label: `${t('Application')} ${c.order + 1} — ${c.title}`,
+        questions: qs,
+      })
   }
   const free = appQs.filter((q) => !q.caseId || !caseById.has(q.caseId))
   if (free.length > 0) {
-    groups.push({ label: "Exercices d'application (ancien format)", questions: free })
+    groups.push({ label: t("Exercices d'application (ancien format)"), questions: free })
   }
   return (
     <>
       {groups.map((g) => (
-        <ResultSection key={g.label} title={`${g.label} — choix des équipes`}>
+        <ResultSection key={g.label} title={`${g.label} — ${t('choix des équipes')}`}>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[320px] text-sm">
               <thead>
-                <tr className="border-b border-stone-200 text-left text-xs text-stone-500">
-                  <th className="py-2 pr-3 font-medium">Équipe</th>
+                <tr className="border-b border-stone-200 text-start text-xs text-stone-500">
+                  <th className="py-2 pe-3 font-medium">{t('Équipe')}</th>
                   {g.questions.map((_, i) => (
                     <th key={i} className="py-2 px-1.5 text-center font-medium">
                       Q{i + 1}
@@ -753,12 +839,12 @@ function AppResultsByCase({
                 </tr>
               </thead>
               <tbody>
-                {data.teams.map((t) => (
-                  <tr key={t.id} className="border-b border-stone-100">
-                    <td className="py-2 pr-3 font-medium text-stone-800">{t.name}</td>
+                {data.teams.map((tm) => (
+                  <tr key={tm.id} className="border-b border-stone-100">
+                    <td className="py-2 pe-3 font-medium text-stone-800">{tm.name}</td>
                     {g.questions.map((q) => {
                       const a = data.appAnswers.find(
-                        (x) => x.questionId === q.id && x.teamId === t.id
+                        (x) => x.questionId === q.id && x.teamId === tm.id
                       )
                       return (
                         <td key={q.id} className="py-2 px-1.5 text-center">
@@ -786,7 +872,9 @@ function AppResultsByCase({
             data.appAnswers.some((a) => a.questionId === q.id && a.text)
           ) && (
             <div className="mt-3 space-y-2">
-              <p className="text-xs font-semibold text-stone-500">Justifications des équipes :</p>
+              <p className="text-xs font-semibold text-stone-500">
+                {t('Justifications des équipes :')}
+              </p>
               {g.questions.map((q, qi) =>
                 data.appAnswers
                   .filter((a) => a.questionId === q.id && a.text)
@@ -825,18 +913,23 @@ function noteTone(note: number | null): string {
 }
 
 function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: boolean }) {
+  const { t } = useI18n()
   const grades = data.students.map((s) => ({ s, g: gradeForStudent(data, s.id) }))
   const anyGrade = grades.some(({ g }) => g.final !== null)
   if (!anyGrade) return null
 
   return (
-    <ResultSection title="Note finale sur 20 — iRAT 25 % · tRAT 25 % · Application 35 % · Pairs 15 %">
+    <ResultSection
+      title={t(
+        'Note finale sur 20 — iRAT 25 % · tRAT 25 % · Application 35 % · Pairs 15 %'
+      )}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[560px] text-sm">
           <thead>
-            <tr className="border-b border-stone-200 text-left text-xs text-stone-500">
-              <th className="py-2 pr-3 font-medium">Étudiant</th>
-              <th className="py-2 pr-3 font-medium">Équipe</th>
+            <tr className="border-b border-stone-200 text-start text-xs text-stone-500">
+              <th className="py-2 pe-3 font-medium">{t('Étudiant')}</th>
+              <th className="py-2 pe-3 font-medium">{t('Équipe')}</th>
               <th className="py-2 px-1.5 text-center font-medium">
                 iRAT
                 <span className="block text-[10px] font-normal">25 %</span>
@@ -846,14 +939,14 @@ function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: 
                 <span className="block text-[10px] font-normal">25 %</span>
               </th>
               <th className="py-2 px-1.5 text-center font-medium">
-                Application
+                {t('Application')}
                 <span className="block text-[10px] font-normal">35 %</span>
               </th>
               <th className="py-2 px-1.5 text-center font-medium">
-                Pairs
+                {t('Pairs')}
                 <span className="block text-[10px] font-normal">15 %</span>
               </th>
-              <th className="py-2 pl-3 text-center font-medium">Note finale</th>
+              <th className="py-2 ps-3 text-center font-medium">{t('Note finale')}</th>
             </tr>
           </thead>
           <tbody>
@@ -886,14 +979,12 @@ function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: 
         </table>
       </div>
       <p className="mt-3 text-xs leading-relaxed text-stone-500">
-        Chaque composante est d&apos;abord ramenée sur 20 (iRAT : 1 point par bonne réponse ; tRAT :
-        barème 4/2/1/0 ; application : réponses correctes de l&apos;équipe ; pairs : moyenne reçue
-        sur 5). Si une composante est indisponible — par exemple aucun exercice
-        d&apos;application ou aucune évaluation reçue — son poids est automatiquement redistribué
-        sur les autres (colonne « — »).{' '}
+        {t(
+          'Chaque composante est d’abord ramenée sur 20 (iRAT : 1 point par bonne réponse ; tRAT : barème 4/2/1/0 ; application : réponses correctes de l’équipe ; pairs : moyenne reçue sur 5). Si une composante est indisponible — par exemple aucun exercice d’application ou aucune évaluation reçue — son poids est automatiquement redistribué sur les autres (colonne « — »).'
+        )}{' '}
         {!finished && (
           <span className="font-medium text-amber-700">
-            Séance en cours : ces notes sont provisoires.
+            {t('Séance en cours : ces notes sont provisoires.')}
           </span>
         )}
       </p>
@@ -904,22 +995,25 @@ function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: 
 // ================= Onglet RÉCLAMATIONS =================
 
 export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: ManageFn }) {
+  const { t } = useI18n()
   // Les réclamations portent toujours sur les questions RAT (iRAT/tRAT) :
   // on numérote donc dans cette liste, pas dans la liste complète.
   const ratQs = data.questions.filter((q) => q.phase === 'rat')
   if (data.appeals.length === 0) {
     return (
       <p className="rounded-2xl border border-dashed border-stone-300 bg-white p-8 text-center text-sm text-stone-500">
-        Aucune réclamation pour le moment. Pendant la phase « Réclamations », les équipes peuvent
-        contester une réponse directement depuis leur téléphone.
+        {t(
+          'Aucune réclamation pour le moment. Pendant la phase « Réclamations », les équipes peuvent contester une réponse directement depuis leur téléphone.'
+        )}
       </p>
     )
   }
   return (
     <div className="space-y-3">
       <p className="text-xs text-stone-500">
-        Accepter une réclamation donne automatiquement les 4 points du tRAT à l&apos;équipe pour
-        cette question.
+        {t(
+          'Accepter une réclamation donne automatiquement les 4 points du tRAT à l’équipe pour cette question.'
+        )}
       </p>
       {data.appeals.map((a) => {
         const team = data.teams.find((t) => t.id === a.teamId)
@@ -929,10 +1023,13 @@ export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: Manag
           <div key={a.id} className="rounded-2xl border border-stone-200 bg-white p-4">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-700">
-                {team?.name ?? 'Équipe ?'}
+                {team?.name ?? t('Équipe ?')}
               </span>
               <span className="text-xs text-stone-500">
-                Question {qi} : {(question?.text ?? '').slice(0, 60)}
+                {t('Question {n} : {text}', {
+                  n: qi,
+                  text: (question?.text ?? '').slice(0, 60),
+                })}
                 {(question?.text ?? '').length > 60 ? '…' : ''}
               </span>
             </div>
@@ -947,7 +1044,7 @@ export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: Manag
                   onClick={() => manage('resolve_appeal', { id: a.id, status: 'accepted' })}
                 >
                   <Check className="mr-1.5 h-4 w-4" />
-                  Accepter (+4 pts)
+                  {t('Accepter (+4 pts)')}
                 </Button>
                 <Button
                   size="sm"
@@ -956,7 +1053,7 @@ export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: Manag
                   onClick={() => manage('resolve_appeal', { id: a.id, status: 'rejected' })}
                 >
                   <X className="mr-1.5 h-4 w-4" />
-                  Refuser
+                  {t('Refuser')}
                 </Button>
               </div>
             ) : (
@@ -970,11 +1067,11 @@ export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: Manag
               >
                 {a.status === 'accepted' ? (
                   <>
-                    <Check className="h-3.5 w-3.5" /> Acceptée (+4 pts)
+                    <Check className="h-3.5 w-3.5" /> {t('Acceptée (+4 pts)')}
                   </>
                 ) : (
                   <>
-                    <X className="h-3.5 w-3.5" /> Refusée
+                    <X className="h-3.5 w-3.5" /> {t('Refusée')}
                   </>
                 )}
               </p>
@@ -982,6 +1079,1008 @@ export function AppealsTab({ data, manage }: { data: DashboardDTO; manage: Manag
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// ================= Onglet SIGNALEMENTS (v2.5.1) =================
+// Rubrique demandée par l'enseignant, à part entière et placée juste
+// après « Réclamations ». Chaque signalement envoyé par les appareils
+// étudiants est divisé PAR ÉPREUVE : iRAT, tRAT, application (= cas
+// cliniques). Les événements hors épreuve (accueil, réclamations,
+// évaluation par les pairs…) ou antérieurs à la v2.5.1 (phase NULL)
+// sont regroupés sous « Autres moments ». Rappel : ce sont des indices
+// à interpréter, jamais des preuves.
+
+const ALERT_CATS = ['irat', 'trat', 'application', 'autres'] as const
+type AlertCat = (typeof ALERT_CATS)[number]
+
+interface AlertCell {
+  total: number
+  /** combinaison de touches de capture (PC uniquement) */
+  captures: number
+  /** application passée en arrière-plan pendant l'épreuve */
+  sorties: number
+}
+
+function catOf(phase: string | null): AlertCat {
+  if (phase === 'irat' || phase === 'trat' || phase === 'application') return phase
+  return 'autres'
+}
+
+export function SignalementsTab({ data }: { data: DashboardDTO }) {
+  const { t } = useI18n()
+  const alerts = data.alerts ?? []
+
+  if (alerts.length === 0) {
+    return (
+      <p className="rounded-2xl border border-dashed border-stone-300 bg-white p-8 text-center text-sm text-stone-500">
+        {t(
+          "Aucun signalement pour le moment. Les suspicions de capture d’écran (ordinateur) et les sorties de l’application pendant les épreuves apparaîtront ici, réparties par étudiant et par épreuve."
+        )}
+      </p>
+    )
+  }
+
+  // Regroupement : une ligne par étudiant, un compteur par épreuve.
+  const rows: {
+    key: string
+    name: string
+    cells: Record<AlertCat, AlertCell>
+    total: number
+    last: Date
+  }[] = []
+  const byStudent = new Map<string, (typeof rows)[number]>()
+  for (const a of alerts) {
+    let row = byStudent.get(a.studentId)
+    if (!row) {
+      row = {
+        key: a.studentId,
+        name: a.studentName,
+        cells: {
+          irat: { total: 0, captures: 0, sorties: 0 },
+          trat: { total: 0, captures: 0, sorties: 0 },
+          application: { total: 0, captures: 0, sorties: 0 },
+          autres: { total: 0, captures: 0, sorties: 0 },
+        },
+        total: 0,
+        last: new Date(a.createdAt),
+      }
+      byStudent.set(a.studentId, row)
+      rows.push(row)
+    }
+    const cell = row.cells[catOf(a.phase)]
+    cell.total += 1
+    if (a.kind === 'screenshot') cell.captures += 1
+    else cell.sorties += 1
+    row.total += 1
+    const d = new Date(a.createdAt)
+    if (d > row.last) row.last = d
+  }
+  // Étudiants les plus récemment signalés en premier.
+  rows.sort((x, y) => y.last.getTime() - x.last.getTime())
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs leading-relaxed text-stone-500">
+        {t(
+          'Chaque signalement est classé par épreuve : iRAT, tRAT ou application (cas cliniques). Ceux survenus hors épreuve — accueil, réclamations, évaluation par les pairs… — sont regroupés sous « Autres moments ».'
+        )}
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[620px] text-sm">
+          <thead>
+            <tr className="border-b border-stone-200 text-start text-xs text-stone-500">
+              <th className="py-2 pe-3 font-medium">{t('Étudiant')}</th>
+              <th className="py-2 px-1.5 text-center font-medium">{t('iRAT')}</th>
+              <th className="py-2 px-1.5 text-center font-medium">{t('tRAT')}</th>
+              <th className="py-2 px-1.5 text-center font-medium">
+                {t('Application (cas cliniques)')}
+              </th>
+              <th className="py-2 px-1.5 text-center font-medium">{t('Autres moments')}</th>
+              <th className="py-2 px-1.5 text-center font-medium">{t('Total')}</th>
+              <th className="py-2 ps-3 text-center font-medium">{t('Dernier')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} className="border-b border-stone-100 align-top">
+                <td className="py-2 pe-3 font-medium text-stone-800">{r.name}</td>
+                {ALERT_CATS.map((cat) => (
+                  <AlertCountCell key={cat} cell={r.cells[cat]} />
+                ))}
+                <td className="py-2 px-1.5 text-center font-bold text-stone-900">{r.total}</td>
+                <td
+                  className="py-2 ps-3 text-center text-xs text-stone-500"
+                  title={formatDate(r.last)}
+                >
+                  {formatDate(r.last, { hour: '2-digit', minute: '2-digit' })}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-700">
+        <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+        {t(
+          'Une suspicion, pas une preuve : l’écran peut s’être simplement verrouillé, ou la combinaison de touches appartenir au navigateur. Les captures ne sont jamais bloquables (limite des navigateurs) — mais chaque image reste marquée du nom de l’étudiant.'
+        )}
+      </p>
+    </div>
+  )
+}
+
+/** Cellule compteur d'une épreuve : total en gras, détail captures /
+ *  sorties en petit sous le nombre (— si aucun). */
+function AlertCountCell({ cell }: { cell: AlertCell }) {
+  const { t } = useI18n()
+  if (cell.total === 0) {
+    return (
+      <td className="py-2 px-1.5 text-center">
+        <span className="text-stone-300">—</span>
+      </td>
+    )
+  }
+  return (
+    <td className="py-2 px-1.5 text-center">
+      <span className="font-bold text-amber-800">{cell.total}</span>
+      {cell.captures > 0 && (
+        <p className="text-[10px] leading-tight text-stone-500">
+          {t('{n} capture(s) d’écran suspectée(s)', { n: cell.captures })}
+        </p>
+      )}
+      {cell.sorties > 0 && (
+        <p className="text-[10px] leading-tight text-stone-500">
+          {t('{n} sortie(s) de l’application', { n: cell.sorties })}
+        </p>
+      )}
+    </td>
+  )
+}
+
+// ================= v2.6.0 : Onglet QUESTIONNAIRE (TBL-SAI) =================
+
+/** Moyenne d'une sous-échelle (1 à 5) à partir des moyennes brutes par
+ *  item : les items inversés (formulation négative) voient leur moyenne
+ *  retournée (6 − moyenne), conformément à la cotation de l'instrument. */
+function saiSubscaleMeanFromItemMeans(
+  entries: { mean: number; n: number; reversed: boolean }[]
+): number | null {
+  const usable = entries.filter((e) => e.n > 0 && Number.isFinite(e.mean))
+  if (usable.length === 0) return null
+  const adjusted = usable.map((e) => (e.reversed ? 6 - e.mean : e.mean))
+  return adjusted.reduce((s, v) => s + v, 0) / adjusted.length
+}
+
+export function QuestionnaireTab({
+  data,
+  manage,
+}: {
+  data: DashboardDTO
+  manage: ManageFn
+}) {
+  const { t } = useI18n()
+  const { toast } = useToast()
+  const stats = data.saiStats ?? { completed: 0, items: [], comments: [] }
+  const hasResponses = stats.items.some((it) => it.n > 0)
+  const itemStats = new Map(stats.items.map((s) => [s.id, s]))
+
+  const [newSubscale, setNewSubscale] = useState('satisfaction')
+  const [newText, setNewText] = useState('')
+  const [newReversed, setNewReversed] = useState(false)
+
+  return (
+    <div className="space-y-4">
+      {/* Présentation */}
+      <div className="rounded-2xl border border-stone-200 bg-white p-4">
+        <p className="text-sm font-bold text-stone-900">
+          {t('Questionnaire de fin de séance (TBL-SAI)')}
+        </p>
+        <p className="mt-2 text-sm leading-relaxed text-stone-600">
+          {t(
+            'À la fin de la séance, les étudiants répondent à ce questionnaire pour accéder à leur note et à leur rang. Par défaut, les 33 items standard de l’instrument (Mennenga, 2010) sont proposés, traduits dans toutes les langues de l’application.'
+          )}
+        </p>
+        <p className="mt-2 rounded-xl bg-stone-50 px-3 py-2 text-xs leading-relaxed text-stone-500">
+          {t(
+            'Personnaliser le libellé d’un item remplace sa traduction par votre texte, affiché tel quel dans toutes les langues. Les items « inversés » (formulation négative) sont automatiquement pris en compte dans les moyennes de sous-échelles.'
+          )}
+        </p>
+      </div>
+
+      {/* Garde-fou : réponses déjà collectées */}
+      {hasResponses && (
+        <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {t(
+            'Des étudiants ont déjà répondu : la suppression d’items et la réinitialisation sont bloquées, mais les libellés restent modifiables.'
+          )}
+        </p>
+      )}
+
+      {/* Réinitialisation (bloquée par le serveur si des réponses existent) */}
+      <Button
+        variant="outline"
+        className="h-10 w-full border-stone-300 text-stone-600"
+        onClick={() => {
+          if (
+            window.confirm(
+              t(
+                'Réinitialiser le questionnaire standard ? Toutes vos modifications seront perdues (l’opération est impossible si des étudiants ont déjà répondu).'
+              )
+            )
+          ) {
+            manage('sai_reset')
+          }
+        }}
+      >
+        {t('Réinitialiser le questionnaire standard')}
+      </Button>
+
+      {/* Items par sous-échelle */}
+      {SAI_SUBSCALES.map((sub) => {
+        const items = data.saiItems.filter((it) => it.subscale === sub)
+        const info = SAI_SUBSCALE_INFO[sub]
+        return (
+          <section key={sub} className="space-y-2">
+            <div className="rounded-xl bg-stone-100 px-4 py-3">
+              <p className="text-sm font-bold text-stone-800">{t(info.labelKey)}</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-stone-500">
+                {t(info.descriptionKey)}
+              </p>
+            </div>
+            {items.length === 0 && (
+              <p className="rounded-2xl border border-dashed border-stone-300 bg-stone-50/50 p-4 text-center text-sm text-stone-500">
+                {t('Aucun item dans cette sous-échelle.')}
+              </p>
+            )}
+            <div className="space-y-2">
+              {items.map((it, i) => (
+                <SaiItemEditor
+                  key={it.id}
+                  index={i}
+                  item={it}
+                  deletable={!hasResponses}
+                  manage={manage}
+                />
+              ))}
+            </div>
+          </section>
+        )
+      })}
+
+      {/* Ajout d'un item personnalisé */}
+      <div className="space-y-2 rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 p-3">
+        <p className="text-sm font-bold text-stone-800">{t('Ajouter un item')}</p>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div>
+            <Label className="text-xs">{t('Sous-échelle de l’item')}</Label>
+            <Select value={newSubscale} onValueChange={setNewSubscale}>
+              <SelectTrigger className="mt-1 h-9 bg-white text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {SAI_SUBSCALES.map((sub) => (
+                  <SelectItem key={sub} value={sub}>
+                    {t(SAI_SUBSCALE_INFO[sub].labelKey)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="sm:col-span-2 flex items-end">
+            <label className="flex items-center gap-2 pb-2 text-xs text-stone-600">
+              <input
+                type="checkbox"
+                checked={newReversed}
+                onChange={(e) => setNewReversed(e.target.checked)}
+                className="h-4 w-4 accent-emerald-600"
+              />
+              {t('Item inversé (formulation négative)')}
+            </label>
+          </div>
+        </div>
+        <Textarea
+          value={newText}
+          onChange={(e) => setNewText(e.target.value)}
+          placeholder={t('Libellé de l’item')}
+          rows={2}
+          maxLength={500}
+          className="resize-none bg-white text-sm"
+        />
+        <Button
+          className="h-10 w-full bg-emerald-600 hover:bg-emerald-700"
+          disabled={newText.trim().length < 3}
+          onClick={async () => {
+            const ok = await manage('sai_add_item', {
+              subscale: newSubscale,
+              text: newText.trim(),
+              reversed: newReversed,
+            })
+            if (ok) {
+              toast({ title: t('Nouvel item ajouté en fin de liste.') })
+              setNewText('')
+              setNewReversed(false)
+            }
+          }}
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          {t('Ajouter un item')}
+        </Button>
+      </div>
+
+      {/* ---- Résultats ---- */}
+      <div className="space-y-4 rounded-2xl border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-sm font-bold text-stone-900">{t('Résultats du questionnaire')}</p>
+          <p className="text-xs text-stone-500">
+            {t('{n} étudiant(s) ont répondu sur {total} inscrit(s)', {
+              n: stats.completed,
+              total: data.students.length,
+            })}
+          </p>
+        </div>
+
+        {stats.completed === 0 ? (
+          <p className="rounded-xl bg-stone-50 px-3 py-2 text-sm text-stone-500">
+            {t('Aucune réponse pour le moment.')}
+          </p>
+        ) : (
+          <>
+            {/* Moyennes de sous-échelles (items inversés pris en compte) */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              {SAI_SUBSCALES.map((sub) => {
+                const entries = data.saiItems
+                  .filter((it) => it.subscale === sub)
+                  .map((it) => ({
+                    mean: itemStats.get(it.id)?.mean ?? 0,
+                    n: itemStats.get(it.id)?.n ?? 0,
+                    reversed: it.reversed,
+                  }))
+                const mean = saiSubscaleMeanFromItemMeans(entries)
+                return (
+                  <div
+                    key={sub}
+                    className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-center"
+                  >
+                    <p className="text-[11px] font-semibold leading-tight text-stone-500">
+                      {t(SAI_SUBSCALE_INFO[sub].labelKey)}
+                    </p>
+                    <p className="mt-1 text-2xl font-bold text-stone-800">
+                      {mean === null ? '—' : fmtNote(mean)}
+                      <span className="text-xs font-normal text-stone-400"> / 5</span>
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="text-center text-[11px] text-stone-400">
+              {t('Moyenne (1 à 5) — items inversés pris en compte')}
+            </p>
+
+            {/* Détail par item */}
+            <div>
+              <p className="mb-1.5 text-xs font-semibold text-stone-500">
+                {t('Réponses aux items')}
+              </p>
+              <div className="max-h-72 overflow-y-auto rounded-xl border border-stone-200">
+                <table className="w-full text-xs">
+                  <tbody>
+                    {data.saiItems.map((it, i) => {
+                      const st = itemStats.get(it.id)
+                      return (
+                        <tr key={it.id} className={i % 2 === 0 ? 'bg-white' : 'bg-stone-50'}>
+                          <td className="px-3 py-2 leading-snug text-stone-700">
+                            <span className="mr-1 font-mono text-stone-400">{i + 1}.</span>
+                            {saiItemText(it)}
+                            {it.reversed && (
+                              <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-700">
+                                {t('Item inversé (formulation négative)')}
+                              </span>
+                            )}
+                          </td>
+                          <td className="w-28 px-3 py-2 text-right">
+                            <span className="font-bold text-stone-800">
+                              {st && st.n > 0 ? fmtNote(st.mean) : '—'}
+                            </span>
+                            <span className="ml-1 text-stone-400">/ 5</span>
+                          </td>
+                          <td className="w-14 px-3 py-2 text-right text-stone-400">
+                            n={st?.n ?? 0}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-1 text-right text-[11px] text-stone-400">{t('Moyenne de l’item')}</p>
+            </div>
+
+            {/* Commentaires */}
+            <div>
+              <p className="mb-1.5 text-xs font-semibold text-stone-500">
+                {t('Commentaires des étudiants')}
+              </p>
+              {stats.comments.length === 0 ? (
+                <p className="rounded-xl bg-stone-50 px-3 py-2 text-sm text-stone-500">
+                  {t('Aucun commentaire pour le moment.')}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {stats.comments.map((c, i) => (
+                    <div key={i} className="rounded-xl bg-stone-50 px-3 py-2">
+                      <p className="text-xs font-semibold text-stone-600">{c.studentName}</p>
+                      <p className="mt-0.5 text-sm leading-relaxed text-stone-700">{c.comment}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SaiItemEditor({
+  index,
+  item,
+  deletable,
+  manage,
+}: {
+  index: number
+  item: DashboardDTO['saiItems'][number]
+  deletable: boolean
+  manage: ManageFn
+}) {
+  const { t } = useI18n()
+  const { toast } = useToast()
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState(item.text ?? (item.textKey ? t(item.textKey) : ''))
+  const [reversed, setReversed] = useState(item.reversed)
+  const [saving, setSaving] = useState(false)
+  const dirty = (item.text ?? null) !== (text.trim() || null) || reversed !== item.reversed
+
+  const save = async (customText: string | null) => {
+    if (saving) return
+    if (customText !== null && customText.trim().length < 3) {
+      toast({ title: t('Le libellé de l’item doit contenir au moins 3 caractères.') })
+      return
+    }
+    setSaving(true)
+    const ok = await manage('sai_update_item', {
+      id: item.id,
+      text: customText,
+      reversed,
+    })
+    setSaving(false)
+    if (ok) setOpen(false)
+  }
+
+  return (
+    <div className="rounded-2xl border border-stone-200 bg-white p-3">
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 text-sm leading-snug text-stone-700">
+          <span className="mr-1 font-mono text-xs text-stone-400">{index + 1}.</span>
+          {saiItemText(item)}
+        </p>
+        <div className="flex shrink-0 items-center gap-1">
+          {item.reversed && (
+            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+              {t('Item inversé (formulation négative)')}
+            </span>
+          )}
+          {item.text && (
+            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+              {t('Libellé personnalisé')}
+            </span>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 px-2 text-stone-500"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? <X className="h-3.5 w-3.5" /> : <Wand2 className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      </div>
+
+      {open && (
+        <div className="mt-2 space-y-2 border-t border-stone-100 pt-2">
+          <Textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={2}
+            maxLength={500}
+            className="resize-none text-sm"
+            placeholder={t('Libellé de l’item')}
+          />
+          <label className="flex items-center gap-2 text-xs text-stone-600">
+            <input
+              type="checkbox"
+              checked={reversed}
+              onChange={(e) => setReversed(e.target.checked)}
+              className="h-4 w-4 accent-emerald-600"
+            />
+            {t('Item inversé (formulation négative)')}
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              className="h-9 bg-emerald-600 hover:bg-emerald-700"
+              disabled={saving || !dirty}
+              onClick={() => save(text.trim() || null)}
+            >
+              <Save className="mr-1 h-3.5 w-3.5" />
+              {t('Sauvegarder')}
+            </Button>
+            {item.textKey && item.text && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-9 border-stone-300"
+                disabled={saving}
+                onClick={() => save(null)}
+              >
+                {t('Réinitialiser le libellé standard')}
+              </Button>
+            )}
+            {deletable && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-9 border-red-200 text-red-600 hover:bg-red-50"
+                disabled={saving}
+                onClick={() => {
+                  if (window.confirm(t('Supprimer cet item ?'))) {
+                    manage('sai_delete_item', { id: item.id })
+                  }
+                }}
+              >
+                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                {t('Supprimer cet item')}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ================= v2.7.0 : Onglet CONFIGURATIONS =================
+// Rubrique demandée par l'enseignant : tout ce qui concerne le RÉGLAGE
+// de la séance (et non son contenu — questions, questionnaire, équipes
+// et résultats restent dans leurs rubriques dédiées) :
+//   1. paramètres (titre, durée du iRAT) ;
+//   2. mode réseau local (étudiants sans internet) ;
+//   3. fichier de séance : téléchargement (déplacé depuis l'en-tête) et
+//      TÉLÉVERSEMENT (restauration complète sur n'importe quel appareil) ;
+//   4. exclusion d'un étudiant de la séance.
+
+/** Sauvegarde telle que lue côté client (validée à nouveau côté serveur). */
+interface BackupFile {
+  format: string
+  version: number
+  exportedAt?: string
+  session: { code?: string; title?: string; iratMinutes?: number }
+  teams?: unknown[]
+  students?: unknown[]
+  questions?: unknown[]
+}
+
+export function ConfigurationsTab({
+  data,
+  manage,
+  onBackup,
+  backupBusy,
+  onOpenSession,
+}: {
+  data: DashboardDTO
+  manage: ManageFn
+  onBackup: () => void
+  backupBusy: boolean
+  onOpenSession: (code: string, token: string, title: string) => void
+}) {
+  const { t } = useI18n()
+  const { toast } = useToast()
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  // --- Paramètres ---
+  const [title, setTitle] = useState(data.session.title)
+  const [minutes, setMinutes] = useState(String(data.session.iratMinutes))
+
+  // --- Téléversement ---
+  const [backup, setBackup] = useState<BackupFile | null>(null)
+  const [pin, setPin] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [confirmImport, setConfirmImport] = useState(false)
+  const [excluded, setExcluded] = useState<string | null>(null)
+
+  // Adresse actuelle (rendu client uniquement, comme l'en-tête du tableau
+  // de bord) — détecte une connexion via le réseau local (IP privée).
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : ''
+  const isLan =
+    /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname) || hostname === 'localhost'
+
+  const pickFile = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      const parsed = JSON.parse(await file.text()) as BackupFile
+      if (
+        parsed.format !== 'tbl-live-sauvegarde' ||
+        (parsed.version !== 1 && parsed.version !== 2) ||
+        !parsed.session ||
+        typeof parsed.session.title !== 'string'
+      ) {
+        toast({
+          title: t('Fichier invalide'),
+          description: t('Ce fichier n’est pas une sauvegarde de séance TBL Live.'),
+          variant: 'destructive',
+        })
+        return
+      }
+      setBackup(parsed)
+      setPin(suggestPin())
+    } catch {
+      toast({
+        title: t('Fichier invalide'),
+        description: t('Le fichier n’a pas pu être lu (JSON illisible).'),
+        variant: 'destructive',
+      })
+    }
+  }
+
+  const doImport = async () => {
+    if (!backup) return
+    setImporting(true)
+    try {
+      const res = await api<{
+        code: string
+        teacherToken: string
+        title: string
+        restored: { students: number; questions: number }
+        ignored: number
+      }>('/api/import', {
+        method: 'POST',
+        body: JSON.stringify({ backup, pin }),
+      })
+      toast({
+        title: t('Séance importée !'),
+        description: t(
+          '{n} étudiant(s) et {m} question(s) restaurés — code : {code}',
+          { n: res.restored.students, m: res.restored.questions, code: res.code }
+        ),
+      })
+      setBackup(null)
+      setPin('')
+      onOpenSession(res.code, res.teacherToken, res.title)
+    } catch (e) {
+      toast({
+        title: t('Importation impossible'),
+        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
+        variant: 'destructive',
+      })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const teamName = (teamId: string | null) =>
+    data.teams.find((tm) => tm.id === teamId)?.name ?? '—'
+
+  return (
+    <div className="space-y-4">
+      {/* ---------- 1. Paramètres de la séance ---------- */}
+      <section className="rounded-2xl border border-stone-200 bg-white p-4">
+        <h3 className="mb-3 text-sm font-bold text-stone-800">{t('Paramètres de la séance')}</h3>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[240px] flex-1">
+            <Label htmlFor="cfg-title" className="text-sm">
+              {t('Titre de la séance')}
+            </Label>
+            <Input
+              id="cfg-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={80}
+              className="mt-1"
+            />
+          </div>
+          <Button
+            variant="outline"
+            className="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            onClick={async () => {
+              const trimmed = title.trim()
+              if (trimmed.length < 2 || trimmed.length > 80) {
+                toast({
+                  title: t('Action impossible'),
+                  description: t('Le titre doit contenir entre 2 et 80 caractères.'),
+                  variant: 'destructive',
+                })
+                return
+              }
+              if (await manage('rename_session', { title: trimmed })) {
+                toast({ title: t('Titre modifié.') })
+              }
+            }}
+          >
+            <Save className="mr-1 h-4 w-4" />
+            {t('Enregistrer le titre')}
+          </Button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div className="w-32">
+            <Label htmlFor="cfg-minutes" className="text-sm">
+              {t('Durée du iRAT (minutes)')}
+            </Label>
+            <Input
+              id="cfg-minutes"
+              type="number"
+              min={1}
+              max={90}
+              value={minutes}
+              onChange={(e) => setMinutes(e.target.value)}
+              className="mt-1"
+            />
+          </div>
+          <Button
+            variant="outline"
+            className="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            onClick={async () => {
+              const m = Number(minutes)
+              if (!Number.isInteger(m) || m < 1 || m > 90) {
+                toast({
+                  title: t('Action impossible'),
+                  description: t('La durée doit être un nombre entier entre 1 et 90 minutes.'),
+                  variant: 'destructive',
+                })
+                return
+              }
+              if (await manage('set_irat_minutes', { minutes: m })) {
+                toast({ title: t('Durée enregistrée.') })
+              }
+            }}
+          >
+            <Save className="mr-1 h-4 w-4" />
+            {t('Enregistrer la durée')}
+          </Button>
+        </div>
+      </section>
+
+      {/* ---------- 2. Mode réseau local ---------- */}
+      <section className="rounded-2xl border border-stone-200 bg-white p-4">
+        <h3 className="mb-1 flex items-center gap-2 text-sm font-bold text-stone-800">
+          <Wifi className="h-4 w-4 text-emerald-600" />
+          {t('Mode réseau local')}
+        </h3>
+        <p className="text-xs leading-relaxed text-stone-600">
+          {t(
+            'Les étudiants sans internet se connectent au réseau Wi-Fi de la salle : c’est l’ordinateur de l’enseignant qui fait relais vers la base de données en ligne.'
+          )}
+        </p>
+        <p className="mt-2 text-xs leading-relaxed text-stone-600">
+          {t(
+            'Sur l’ordinateur qui gère la séance, lancez la commande « npm run lan » (une seule fois, après installation). L’adresse à donner aux étudiants s’affiche alors à l’écran (elle ressemble à http://192.168.x.x:3000).'
+          )}
+        </p>
+        <p className="mt-2 text-xs leading-relaxed text-stone-600">
+          {t(
+            'Étudiants connectés par le réseau local et étudiants connectés par leur propre internet : même séance, même code, résultats synchronisés en temps réel.'
+          )}
+        </p>
+        <p className="mt-2 text-xs leading-relaxed text-stone-600">
+          {t(
+            'Si les étudiants n’atteignent pas l’adresse locale : au premier lancement, Windows demande d’autoriser Node.js dans le pare-feu — cliquez « Autoriser l’accès ».'
+          )}
+        </p>
+        <p className="mt-2 text-xs leading-relaxed text-stone-600">
+          {t(
+            'Sans aucune connexion internet dans la salle : déroulez la séance sur le réseau local, téléchargez le fichier de séance en fin de cours, puis téléversez-le ici depuis un appareil connecté pour tout synchroniser.'
+          )}
+        </p>
+        {origin && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-stone-100 p-2 text-sm">
+            <span className="font-semibold text-stone-700">{t('Adresse actuelle :')}</span>
+            <code className="rounded bg-white px-2 py-0.5 font-mono text-xs text-stone-800">
+              {origin}
+            </code>
+            {isLan && (
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                {t('réseau local')}
+              </span>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ---------- 3. Fichier de séance ---------- */}
+      <section className="rounded-2xl border border-stone-200 bg-white p-4">
+        <h3 className="mb-3 text-sm font-bold text-stone-800">{t('Fichier de séance')}</h3>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Button
+            variant="outline"
+            className="h-12 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            onClick={onBackup}
+            disabled={backupBusy}
+          >
+            <Download className="mr-2 h-4 w-4" />
+            {backupBusy ? t('Préparation…') : t('Télécharger la séance (fichier JSON)')}
+          </Button>
+          <Button
+            variant="outline"
+            className="h-12 border-stone-300 text-stone-700 hover:bg-stone-50"
+            onClick={() => fileRef.current?.click()}
+          >
+            <Upload className="mr-2 h-4 w-4" />
+            {t('Téléverser une séance déjà téléchargée')}
+          </Button>
+        </div>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={(e) => {
+            void pickFile(e.target.files?.[0])
+            e.target.value = ''
+          }}
+        />
+
+        {backup && (
+          <div className="mt-4 space-y-3 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold text-stone-800">
+                  {t('Sauvegarde chargée :')} {backup.session.title}
+                </p>
+                <p className="mt-1 text-xs text-stone-600">
+                  {t('Code : {code}', { code: backup.session.code ?? '—' })} ·{' '}
+                  {t('Exporté le {date}', {
+                    date: backup.exportedAt
+                      ? formatDate(new Date(backup.exportedAt))
+                      : '—',
+                  })}
+                </p>
+                <p className="text-xs text-stone-600">
+                  {t('Contenu : {n} étudiant(s), {m} question(s), {k} équipe(s).', {
+                    n: backup.students?.length ?? 0,
+                    m: backup.questions?.length ?? 0,
+                    k: backup.teams?.length ?? 0,
+                  })}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 text-stone-400 hover:bg-stone-100"
+                onClick={() => setBackup(null)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="w-44">
+                <Label htmlFor="cfg-pin" className="flex items-center gap-1 text-sm">
+                  <KeyRound className="h-3.5 w-3.5 text-stone-400" />
+                  {t('Code PIN de la séance importée')}
+                </Label>
+                <Input
+                  id="cfg-pin"
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value.toUpperCase())}
+                  className="mt-1 font-mono tracking-widest"
+                  maxLength={12}
+                />
+              </div>
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-700"
+                disabled={importing || pin.trim().length < 6}
+                onClick={() => setConfirmImport(true)}
+              >
+                <Upload className="mr-1 h-4 w-4" />
+                {importing ? t('Importation…') : t('Importer cette séance')}
+              </Button>
+            </div>
+            <p className="text-xs leading-relaxed text-stone-500">
+              {t(
+                'L’importation crée une NOUVELLE séance complète (questions, équipes, étudiants, réponses, questionnaire) : rien n’est écrasé. Les étudiants retrouvent leur compte avec leur nom et leur code personnel.'
+              )}
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* ---------- 4. Exclusion d'un étudiant ---------- */}
+      <section className="rounded-2xl border border-stone-200 bg-white p-4">
+        <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-stone-800">
+          <UserX className="h-4 w-4 text-red-500" />
+          {t('Exclure un étudiant de la séance')}
+        </h3>
+        {data.students.length === 0 ? (
+          <p className="text-sm text-stone-500">{t('Aucun étudiant pour le moment.')}</p>
+        ) : (
+          <div className="space-y-1.5">
+            {data.students.map((s) => (
+              <div
+                key={s.id}
+                className="flex items-center justify-between gap-2 rounded-xl border border-stone-100 bg-stone-50 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-stone-800">{s.name}</p>
+                  <p className="text-xs text-stone-500">
+                    {teamName(s.teamId)} · {t('code personnel : {code}', { code: s.recoveryCode })}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 shrink-0 text-red-500 hover:bg-red-50 hover:text-red-600"
+                  onClick={() => setExcluded(s.id)}
+                >
+                  <UserX className="mr-1 h-3.5 w-3.5" />
+                  {t('Exclure de la séance')}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Confirmations */}
+      <AlertDialog open={confirmImport} onOpenChange={setConfirmImport}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Importer cette séance ?')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'Une nouvelle séance sera créée avec tout le contenu de la sauvegarde (étudiants, réponses, notes, questionnaire). Les données actuelles ne sont jamais modifiées.'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('Annuler')}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void doImport()}>
+              {t('Importer cette séance')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!excluded} onOpenChange={(o) => !o && setExcluded(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t('Exclure {name} ?', {
+                name: data.students.find((s) => s.id === excluded)?.name ?? '',
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'L’étudiant perd immédiatement l’accès à la séance et ses réponses, évaluations et signalements sont définitivement supprimés. Cette action est irréversible.'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('Annuler')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={async () => {
+                if (excluded && (await manage('remove_student', { studentId: excluded }))) {
+                  toast({ title: t('Étudiant exclu.') })
+                }
+                setExcluded(null)
+              }}
+            >
+              {t('Exclure de la séance')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -1012,9 +2111,30 @@ export function exportCsv(
   const caseById = new Map(data.cases.map((c) => [c.id, c]))
   const appColumnLabel = (q: DashboardDTO['questions'][number], i: number) => {
     const c = q.caseId ? caseById.get(q.caseId) : undefined
-    return c ? `Application ${c.order + 1} Q${appQs.filter((x) => x.caseId === q.caseId).indexOf(q) + 1}` : `Application ex.${i + 1}`
+    return c
+      ? `${t('Application')} ${c.order + 1} Q${
+          appQs.filter((x) => x.caseId === q.caseId).indexOf(q) + 1
+        }`
+      : `${t('Exercice')} ex.${i + 1}`
   }
-  rows.push(['Étudiant', 'Équipe', ...ratQs.map((_, i) => `iRAT Q${i + 1}`), 'iRAT total (sur ' + ratQs.length + ')', 'tRAT équipe (total sur ' + ratQs.length * 4 + ')', ...appQs.map((q, i) => appColumnLabel(q, i)), 'Note pairs (moyenne sur 5)', 'iRAT sur 20 (25%)', 'tRAT sur 20 (25%)', 'Application sur 20 (35%)', 'Pairs sur 20 (15%)', 'NOTE FINALE sur 20'].map(esc).join(';'))
+  rows.push(
+    [
+      t('Étudiant'),
+      t('Équipe'),
+      ...ratQs.map((_, i) => `iRAT Q${i + 1}`),
+      t('iRAT total (sur {n})', { n: ratQs.length }),
+      t('tRAT équipe (total sur {n})', { n: ratQs.length * 4 }),
+      ...appQs.map((q, i) => appColumnLabel(q, i)),
+      t('Note pairs (moyenne sur 5)'),
+      t('iRAT sur 20 (25%)'),
+      t('tRAT sur 20 (25%)'),
+      t('Application sur 20 (35%)'),
+      t('Pairs sur 20 (15%)'),
+      t('NOTE FINALE sur 20'),
+    ]
+      .map(esc)
+      .join(';')
+  )
   for (const s of data.students) {
     const team = data.teams.find((t) => t.id === s.teamId)
     const iratCells = ratQs.map((q) => {
@@ -1044,19 +2164,49 @@ export function exportCsv(
       c.note === null ? '' : c.note.toFixed(2).replace('.', ',')
     )
     const finalCell = g.final === null ? '' : g.final.toFixed(2).replace('.', ',')
-    rows.push([s.name, team?.name ?? '', ...iratCells, `${iratTotal} sur ${ratQs.length}`, `${tratTotal} sur ${ratQs.length * 4}`, ...appCells, peerAvg, ...cells, finalCell].map(esc).join(';'))
+    rows.push(
+      [
+        s.name,
+        team?.name ?? '',
+        ...iratCells,
+        t('{n} sur {m}', { n: iratTotal, m: ratQs.length }),
+        t('{n} sur {m}', { n: tratTotal, m: ratQs.length * 4 }),
+        ...appCells,
+        peerAvg,
+        ...cells,
+        finalCell,
+      ]
+        .map(esc)
+        .join(';')
+    )
   }
 
   rows.push('')
 
   // Tableau 2 : réclamations
   if (data.appeals.length > 0) {
-    rows.push(['Réclamations', 'Équipe', 'Question', 'Justification', 'Décision'].map(esc).join(';'))
+    rows.push(
+      [t('Réclamations'), t('Équipe'), t('Question'), t('Justification'), t('Décision')]
+        .map(esc)
+        .join(';')
+    )
     for (const a of data.appeals) {
-      const team = data.teams.find((t) => t.id === a.teamId)
+      const team = data.teams.find((tm) => tm.id === a.teamId)
       const q = data.questions.find((x) => x.id === a.questionId)
       rows.push(
-        ['', team?.name ?? '', q?.text ?? '', a.text, a.status === 'accepted' ? 'Acceptée' : a.status === 'rejected' ? 'Refusée' : 'En attente'].map(esc).join(';')
+        [
+          '',
+          team?.name ?? '',
+          q?.text ?? '',
+          a.text,
+          a.status === 'accepted'
+            ? t('Acceptée')
+            : a.status === 'rejected'
+              ? t('Refusée')
+              : t('En attente'),
+        ]
+          .map(esc)
+          .join(';')
       )
     }
     rows.push('')
@@ -1065,10 +2215,28 @@ export function exportCsv(
   // Tableau 3 : commentaires des pairs
   const withComments = data.peerEvals.filter((e) => e.comment)
   if (withComments.length > 0) {
-    rows.push(['Évaluation par les pairs', 'Évaluateur', 'Évalué', 'Note', 'Commentaire'].map(esc).join(';'))
+    rows.push(
+      [
+        t('Évaluation par les pairs'),
+        t('Évaluateur'),
+        t('Évalué'),
+        t('Note'),
+        t('Commentaire'),
+      ]
+        .map(esc)
+        .join(';')
+    )
     for (const e of withComments) {
       rows.push(
-        ['', data.students.find((s) => s.id === e.evaluatorId)?.name ?? '', data.students.find((s) => s.id === e.evaluatedId)?.name ?? '', String(e.score), e.comment ?? ''].map(esc).join(';')
+        [
+          '',
+          data.students.find((s) => s.id === e.evaluatorId)?.name ?? '',
+          data.students.find((s) => s.id === e.evaluatedId)?.name ?? '',
+          String(e.score),
+          e.comment ?? '',
+        ]
+          .map(esc)
+          .join(';')
       )
     }
   }

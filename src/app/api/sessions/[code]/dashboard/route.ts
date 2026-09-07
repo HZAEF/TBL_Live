@@ -1,21 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { getSessionByCode, parseChoices } from '@/lib/tbl'
+import { getSessionByCode, parseChoices, extractToken, safeEqualStrings } from '@/lib/tbl'
 import { applyLifecycle } from '@/lib/session-lifecycle'
 
-// GET /api/sessions/[code]/dashboard?token= — données complètes du tableau de bord enseignant
+// GET /api/sessions/[code]/dashboard — données complètes du tableau de bord
+// enseignant. Jeton transmis par l'en-tête « Authorization: Bearer … » (les
+// URL des appels API ne contiennent plus le jeton → il n'apparaît pas dans
+// les journaux serveur) ; le repli ?token= reste accepté (onglets ouverts
+// avant une mise à jour de l'application).
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ code: string }> }
 ) {
   try {
     const { code } = await params
-    const token = req.nextUrl.searchParams.get('token') || ''
+    const token = extractToken(req)
     const session = await getSessionByCode(code)
     if (!session) {
       return NextResponse.json({ error: 'Séance introuvable.' }, { status: 404 })
     }
-    if (!token || token !== session.teacherToken) {
+    if (!token || !safeEqualStrings(token, session.teacherToken)) {
       return NextResponse.json({ error: 'Accès refusé. Reconnectez-vous.' }, { status: 401 })
     }
 
@@ -30,7 +34,7 @@ export async function GET(
       )
     }
 
-    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals] =
+    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals, alertEvents, saiItems, saiResponses, saiComments] =
       await Promise.all([
         db.question.findMany({
           where: { sessionId: session.id },
@@ -48,7 +52,8 @@ export async function GET(
           orderBy: { createdAt: 'asc' },
           // recoveryCode : visible par l'enseignant uniquement — permet de
           // redonner son code à un étudiant qui l'a perdu (porte de secours).
-          select: { id: true, name: true, teamId: true, recoveryCode: true },
+          // saiCompletedAt : v2.6.0, statistiques du questionnaire TBL-SAI.
+          select: { id: true, name: true, teamId: true, recoveryCode: true, saiCompletedAt: true },
         }),
         db.answer.findMany({
           where: { question: { sessionId: session.id }, kind: 'irat' },
@@ -88,11 +93,54 @@ export async function GET(
             comment: true,
           },
         }),
+        // v2.5.0 : signalements anti-capture (capture suspectée / sortie
+        // d'application) — les plus récents d'abord, volume borné.
+        db.alertEvent.findMany({
+          where: { student: { sessionId: session.id } },
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+          select: {
+            id: true,
+            studentId: true,
+            kind: true,
+            phase: true,
+            createdAt: true,
+            student: { select: { name: true } },
+          },
+        }),
+        // v2.6.0 : questionnaire de fin de séance (TBL-SAI) — items de la
+        // séance, réponses agrégées par item et commentaires libres.
+        db.saiItem.findMany({
+          where: { sessionId: session.id },
+          orderBy: [{ order: 'asc' }, { id: 'asc' }],
+          select: { id: true, subscale: true, textKey: true, text: true, reversed: true },
+        }),
+        db.saiResponse.findMany({
+          where: { student: { sessionId: session.id } },
+          // v2.7.0 : studentId ajouté — l'export Excel (3ᵈ feuille)
+          // calcule les moyennes de sous-échelles PAR étudiant.
+          select: { studentId: true, itemId: true, value: true },
+        }),
+        db.student.findMany({
+          where: { sessionId: session.id, saiComment: { not: null } },
+          orderBy: [{ saiCompletedAt: 'asc' }],
+          select: { name: true, saiComment: true, saiCompletedAt: true },
+        }),
       ])
 
     // Questions RAT (iRAT + tRAT) en premier, exercices d'application ensuite —
     // la numérotation affichée correspond ainsi à l'ordre réel du déroulé TBL.
     const phaseRank = (p: string) => (p === 'application' ? 1 : 0)
+
+    // v2.6.0 — Agrégats du questionnaire TBL-SAI (moyenne brute par item,
+    // nombre d'étudiants ayant répondu, commentaires dans l'ordre).
+    const saiByItem = new Map<string, { sum: number; n: number }>()
+    for (const r of saiResponses) {
+      const cur = saiByItem.get(r.itemId) ?? { sum: 0, n: 0 }
+      cur.sum += r.value
+      cur.n += 1
+      saiByItem.set(r.itemId, cur)
+    }
     questions.sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase) || a.order - b.order)
 
     return NextResponse.json({
@@ -141,6 +189,48 @@ export async function GET(
         text: a.text,
       })),
       peerEvals,
+      alerts: alertEvents.map((a) => ({
+        id: a.id,
+        studentId: a.studentId,
+        studentName: a.student.name,
+        kind: a.kind as 'screenshot' | 'tab_hidden',
+        phase: a.phase,
+        createdAt: a.createdAt,
+      })),
+      // v2.6.0 — questionnaire TBL-SAI : items + agrégats par item +
+      // commentaires. Les moyennes de sous-échelles sont calculées côté
+      // client (inversion des items négatifs, libellés i18n).
+      saiItems: saiItems.map((it) => ({
+        id: it.id,
+        subscale: it.subscale as 'accountability' | 'preference' | 'satisfaction',
+        textKey: it.textKey,
+        text: it.text,
+        reversed: it.reversed,
+      })),
+      saiStats: {
+        completed: students.filter((s) => s.saiCompletedAt !== null).length,
+        items: saiItems.map((it) => {
+          const agg = saiByItem.get(it.id)
+          return {
+            id: it.id,
+            mean: agg && agg.n > 0 ? agg.sum / agg.n : 0,
+            n: agg?.n ?? 0,
+          }
+        }),
+        comments: saiComments.map((s) => ({
+          studentName: s.name,
+          comment: s.saiComment as string,
+          createdAt: (s.saiCompletedAt ?? new Date()).toISOString(),
+        })),
+      },
+      // v2.7.0 — réponses brutes du questionnaire (étudiant × item) :
+      // l'export Excel calcule les moyennes de sous-échelles par étudiant.
+      // Volume borné : au plus 33 items × nombre d'étudiants.
+      saiResponses: saiResponses.map((r) => ({
+        studentId: r.studentId,
+        itemId: r.itemId,
+        value: r.value,
+      })),
     })
   } catch (e) {
     console.error('GET /api/sessions/[code]/dashboard', e)

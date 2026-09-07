@@ -23,6 +23,19 @@ export interface QuestionDTO {
   caseId?: string | null
 }
 
+/** v2.6.0 — Item du questionnaire de fin de séance (TBL-SAI).
+ *  Libellé affiché = text ?? t(textKey) : les items standard restent
+ *  multilingues (textKey i18n), les libellés personnalisés par
+ *  l'enseignant sont affichés tels quels dans toutes les langues. */
+export interface SaiItemDTO {
+  id: string
+  subscale: 'accountability' | 'preference' | 'satisfaction'
+  textKey: string | null
+  text: string | null
+  /** Formulation négative → valeur inversée (6 − v) dans les moyennes */
+  reversed: boolean
+}
+
 export interface CaseDTO {
   id: string
   title: string
@@ -90,6 +103,38 @@ export interface DashboardDTO {
   }[]
   appAnswers: { teamId: string; questionId: string; choice: number; text: string | null }[]
   peerEvals: { evaluatorId: string; evaluatedId: string; score: number; comment: string | null }[]
+  /** v2.6.0 : questionnaire de fin de séance (TBL-SAI) — items et
+   *  résultats agrégés (renvoyés à l'enseignant uniquement). */
+  saiItems: SaiItemDTO[]
+  saiStats?: {
+    /** Nombre d'étudiants ayant soumis le questionnaire */
+    completed: number
+    /** Moyenne brute (1-5) et nombre de réponses par item */
+    items: { id: string; mean: number; n: number }[]
+    /** Commentaires libres des étudiants */
+    comments: { studentName: string; comment: string; createdAt: string }[]
+  }
+  /** v2.7.0 : réponses brutes du questionnaire (étudiant × item) pour
+   *  l'export Excel — moyennes de sous-échelles par étudiant. */
+  saiResponses?: { studentId: string; itemId: string; value: number }[]
+  /** v2.5.0 : signalements automatiques envoyés par les appareils étudiants
+   *  (capture d'écran suspectée sur PC, sortie de l'application pendant un
+   *  test). Des SUSPICIONS à interpréter, jamais des preuves. */
+  alerts?: SessionAlertDTO[]
+}
+
+export interface SessionAlertDTO {
+  id: string
+  studentId: string
+  studentName: string
+  /** 'screenshot' : combinaison de touches de capture (PC uniquement) ;
+   *  'tab_hidden' : application passée en arrière-plan pendant un test. */
+  kind: 'screenshot' | 'tab_hidden'
+  /** v2.5.1 : épreuve en cours au moment du signalement (statut de la
+   *  séance — 'irat', 'trat', 'application'…). NULL = hors épreuve connue
+   *  ou signalement antérieur à la v2.5.1 → « Autres moments ». */
+  phase: string | null
+  createdAt: string
 }
 
 export interface StudentStateDTO {
@@ -106,6 +151,9 @@ export interface StudentStateDTO {
     name: string
     /** Code de reprise personnel (pour retrouver sa séance sur un autre appareil) */
     recoveryCode: string
+    /** v2.6.0 : date de soumission du questionnaire TBL-SAI
+     *  (null = pas encore répondu → note et rang masqués). */
+    saiCompletedAt: string | null
     team: { id: string; name: string } | null
   }
   teamMembers: { id: string; name: string }[]
@@ -136,6 +184,17 @@ export interface StudentStateDTO {
   myPeerEvals?: { evaluatedId: string; score: number; comment: string | null }[]
   /** Moyenne des évaluations reçues de mes coéquipiers (sur 5) — en fin de séance */
   myPeerReceived?: { avg: number; count: number } | null
+  /** v2.6.0 — Questionnaire TBL-SAI (phase finished, AVANT soumission) :
+   *  les items de la séance dans l'ordre. */
+  saiItems?: SaiItemDTO[]
+  /** v2.6.0 — Note finale sur 20 calculée par le serveur, transmise
+   *  UNIQUEMENT après la soumission du questionnaire TBL-SAI (les
+   *  réponses correctes ne sont plus envoyées en fin de séance : la
+   *  note ne peut pas être reconstituée côté étudiant). */
+  finalNote?: number | null
+  /** v2.6.0 — Rang (classement sportif, ex æquo partagés) parmi les
+   *  étudiants notés, transmis uniquement après le questionnaire. */
+  myRank?: { rank: number; total: number } | null
 }
 
 export interface DraftQuestion {
@@ -260,10 +319,20 @@ export const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F']
 
 /** Suggestion de PIN robuste (côté navigateur, alphabet sans caractères
  * ambigus : pas de O/0 ni I/1) — l'enseignant peut la garder ou la modifier.
- * Utilisée à la création d'une séance et à la duplication. */
+ * Utilisée à la création d'une séance et à la duplication.
+ * v2.4.0 : crypto.getRandomValues (générateur cryptographique du navigateur)
+ * plutôt que Math.random — cohérent avec randomBytes côté serveur. L'alphabet
+ * fait exactement 32 caractères : le modulo est sans biais. */
 export function suggestPin(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const buf = new Uint32Array(6)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(buf)
+  } else {
+    // Repli théorique (navigateurs antérieurs à 2017) :
+    for (let i = 0; i < 6; i++) buf[i] = Math.floor(Math.random() * 0x100000000)
+  }
   let out = ''
-  for (let i = 0; i < 6; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)]
+  for (let i = 0; i < 6; i++) out += alphabet[buf[i] % alphabet.length]
   return out
 }

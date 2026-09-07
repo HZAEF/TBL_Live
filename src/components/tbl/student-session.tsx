@@ -14,10 +14,14 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { api, removeStudentSession, usePoll } from '@/lib/tbl-client'
-import { PHASE_INFO, type StudentStateDTO } from '@/lib/tbl-types'
-import { gradeForStudentSelf, fmtNote } from '@/lib/grades'
+import { PHASE_INFO, type StudentStateDTO, type SaiItemDTO } from '@/lib/tbl-types'
+import { useI18n } from '@/lib/i18n'
+import { fmtNote } from '@/lib/grades'
+import { SAI_SUBSCALES, SAI_SUBSCALE_INFO, SAI_LIKERT_KEYS, saiItemText } from '@/lib/sai'
 import { ChoiceButton, choiceLetter, InfoCard, PhaseBadge } from './shared'
 import { IratQuiz, TratQuiz, AppealView, ApplicationView, PeerView } from './student-quizzes'
+import { AntiCapture } from './anti-capture'
+import { Textarea } from '@/components/ui/textarea'
 
 export function StudentSession({
   token,
@@ -29,11 +33,18 @@ export function StudentSession({
   onExit: () => void
 }) {
   const { data, error, loading, refresh } = usePoll<StudentStateDTO>(
-    () => api<StudentStateDTO>(`/api/student?token=${encodeURIComponent(token)}`),
-    2500
+    // v2.4.0 : jeton dans l'en-tête Authorization (hors des journaux serveur).
+    () => api<StudentStateDTO>('/api/student', { headers: { Authorization: `Bearer ${token}` } }),
+    // Sondage adaptatif : 2,5 s pendant les phases où les étudiants
+    // répondent (iRAT, tRAT, application), 5 s pendant les phases d'attente
+    // (accueil, réclamations, feedback, pairs, fin) — divise environ par
+    // deux la charge sur la base Neon pour une grande classe, sans perte
+    // de réactivité là où elle compte.
+    (d) => (d && ['irat', 'trat', 'application'].includes(d.session.status) ? 2500 : 5000)
   )
   const [confirmLeave, setConfirmLeave] = useState(false)
   const [showCode, setShowCode] = useState(false)
+  const { t } = useI18n()
 
   if (loading && !data) {
     return (
@@ -48,14 +59,14 @@ export function StudentSession({
   if (error?.status === 410) {
     return (
       <div className="mx-auto max-w-md space-y-4 py-12 text-center">
-        <p className="text-lg font-bold text-stone-900">Séance supprimée</p>
+        <p className="text-lg font-bold text-stone-900">{t('Séance supprimée')}</p>
         <p className="text-sm text-stone-600">
-          Votre enseignant a supprimé cette séance : elle n&apos;est plus accessible. Si vous
-          pensez qu&apos;il s&apos;agit d&apos;une erreur, prévenez-le — il peut la restaurer
-          pendant 48 heures.
+          {t(
+            'Votre enseignant a supprimé cette séance : elle n’est plus accessible. Si vous pensez qu’il s’agit d’une erreur, prévenez-le — il peut la restaurer pendant 48 heures.'
+          )}
         </p>
         <Button variant="outline" onClick={onExit} className="h-12 border-stone-300">
-          Retour à l&apos;accueil
+          {t('Retour à l’accueil')}
         </Button>
       </div>
     )
@@ -64,13 +75,14 @@ export function StudentSession({
   if (error?.status === 404 || (!data && error)) {
     return (
       <div className="mx-auto max-w-md space-y-4 py-12 text-center">
-        <p className="text-lg font-bold text-stone-900">Connexion perdue</p>
+        <p className="text-lg font-bold text-stone-900">{t('Connexion perdue')}</p>
         <p className="text-sm text-stone-600">
-          Votre session n&apos;est plus reconnue (séance terminée ou supprimée). Vous pouvez
-          rejoindre à nouveau avec le code de la séance.
+          {t(
+            'Votre session n’est plus reconnue (séance terminée ou supprimée). Vous pouvez rejoindre à nouveau avec le code de la séance.'
+          )}
         </p>
         <Button onClick={onLeave} className="h-12 bg-emerald-600 hover:bg-emerald-700">
-          Rejoindre à nouveau
+          {t('Rejoindre à nouveau')}
         </Button>
       </div>
     )
@@ -80,9 +92,25 @@ export function StudentSession({
 
   const status = data.session.status
 
+  // v2.5.0 : protection anti-capture sur TOUTE la séance étudiante
+  // (filigrane nom + code + horodatage, flou en arrière-plan,
+  // anti-copie, impression bloquée). Voir anti-capture.tsx.
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
-      {/* En-tête */}
+    <AntiCapture
+      label={`${data.me.name} · ${data.session.code}`}
+      printMessage={t('Impression désactivée pendant la séance.')}
+      // v2.5.0 : signalement silencieux des suspicions de capture (PC)
+      // vers le tableau de bord enseignant.
+      reportToken={token}
+      // Sorties d'application signalées pendant les phases de test
+      // (iRAT, tRAT, application) — signal fiable sur tous les appareils.
+      watchTab={['irat', 'trat', 'application'].includes(status)}
+      // v2.5.1 : épreuve en cours transmise avec chaque signalement, pour
+      // l'affichage « par épreuve » dans l'onglet Signalements enseignant.
+      phase={status}
+    >
+      <div className="mx-auto max-w-2xl space-y-4">
+        {/* En-tête */}
       <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -91,7 +119,7 @@ export function StudentSession({
             </h1>
             <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-stone-500">
               <PhaseBadge phase={status} />
-              <span>{PHASE_INFO[status].label}</span>
+              <span>{t(PHASE_INFO[status].label)}</span>
             </p>
           </div>
           <Button
@@ -100,8 +128,8 @@ export function StudentSession({
             className="shrink-0 text-stone-400 hover:bg-red-50 hover:text-red-600"
             onClick={() => setConfirmLeave(true)}
           >
-            <LogOut className="mr-1 h-4 w-4" />
-            Quitter
+            <LogOut className="mr-1 h-4 w-4 rtl:rotate-180" />
+            {t('Quitter')}
           </Button>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
@@ -122,50 +150,51 @@ export function StudentSession({
               type="button"
               onClick={() => setShowCode(true)}
               className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-800 transition-colors hover:bg-amber-200"
-              title="Voir mon code de reprise"
+              title={t('Voir mon code personnel')}
             >
               <KeyRound className="h-3 w-3" />
-              code
+              {t('code')}
             </button>
           )}
         </div>
       </div>
 
       {/* Contenu selon la phase */}
-      {status === 'lobby' && <LobbyView data={data} />}
-      {status === 'irat' && <IratQuiz data={data} refresh={refresh} token={token} />}
-      {status === 'trat' && <TratQuiz data={data} refresh={refresh} token={token} />}
-      {status === 'appeal' && <AppealView data={data} refresh={refresh} token={token} />}
-      {status === 'feedback' && <FeedbackView data={data} />}
-      {status === 'application' && <ApplicationView data={data} refresh={refresh} token={token} />}
-      {status === 'peer' && <PeerView data={data} refresh={refresh} token={token} />}
-      {status === 'finished' && <FinishedView data={data} onExit={onExit} />}
+        {status === 'lobby' && <LobbyView data={data} />}
+        {status === 'irat' && <IratQuiz data={data} refresh={refresh} token={token} />}
+        {status === 'trat' && <TratQuiz data={data} refresh={refresh} token={token} />}
+        {status === 'appeal' && <AppealView data={data} refresh={refresh} token={token} />}
+        {status === 'feedback' && <FeedbackView data={data} />}
+        {status === 'application' && <ApplicationView data={data} refresh={refresh} token={token} />}
+        {status === 'peer' && <PeerView data={data} refresh={refresh} token={token} />}
+        {status === 'finished' && <FinishedView data={data} token={token} refresh={refresh} onExit={onExit} />}
 
       {/* Mon code de reprise */}
       <AlertDialog open={showCode} onOpenChange={setShowCode}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Mon code de reprise</AlertDialogTitle>
+            <AlertDialogTitle>{t('Mon code personnel')}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
-                  Pour retrouver votre séance sur un autre appareil (ou après une perte de
-                  connexion), il vous faut : le code de la séance, votre nom, et ce code
-                  personnel.
+                  {t(
+                    'Pour retrouver votre séance sur un autre appareil (ou après une perte de connexion), il vous faut : le code de la séance, votre nom, et ce code personnel.'
+                  )}
                 </p>
                 <p className="select-all rounded-xl bg-stone-900 px-4 py-3 text-center font-mono text-2xl font-bold tracking-[0.35em] text-emerald-300">
                   {data.me.recoveryCode}
                 </p>
                 <p className="text-xs text-stone-500">
-                  Ne le partagez pas : quiconque le connaît peut reprendre votre compte.
-                  Si vous l&apos;avez perdu, demandez-le à votre professeur.
+                  {t(
+                    'Ne le partagez pas : quiconque le connaît peut reprendre votre compte. Si vous l’avez perdu, demandez-le à votre professeur.'
+                  )}
                 </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogAction className="bg-emerald-600 hover:bg-emerald-700">
-              J&apos;ai compris
+              {t('J’ai compris')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -175,42 +204,46 @@ export function StudentSession({
       <AlertDialog open={confirmLeave} onOpenChange={setConfirmLeave}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Quitter cette séance ?</AlertDialogTitle>
+            <AlertDialogTitle>{t('Quitter cette séance ?')}</AlertDialogTitle>
             <AlertDialogDescription>
-              Vos réponses déjà envoyées sont conservées. Vous pourrez revenir avec le même nom et
-              le même code de séance. (Vous pouvez aussi rester connecté et simplement retourner à
-              l&apos;accueil.)
+              {t(
+                'Vos réponses déjà envoyées sont conservées. Vous pourrez revenir avec le même nom, le code de la séance et votre code personnel. (Vous pouvez aussi rester connecté et simplement retourner à l’accueil.)'
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Rester</AlertDialogCancel>
+            <AlertDialogCancel>{t('Rester')}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 removeStudentSession(data.session.code)
                 onLeave()
               }}
             >
-              Oui, me déconnecter
+              {t('Oui, me déconnecter')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+      </div>
+    </AntiCapture>
   )
 }
 
 // ================= Salle d'attente =================
 
 function LobbyView({ data }: { data: StudentStateDTO }) {
+  const { t } = useI18n()
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-stone-200 bg-white p-6 text-center shadow-sm">
         <div className="mx-auto flex h-14 w-14 animate-pulse items-center justify-center rounded-full bg-emerald-100">
           <Clock className="h-7 w-7 text-emerald-600" />
         </div>
-        <p className="mt-3 text-lg font-bold text-stone-900">Bienvenue {data.me.name} !</p>
+        <p className="mt-3 text-lg font-bold text-stone-900">
+          {t('Bienvenue {name} !', { name: data.me.name })}
+        </p>
         <p className="mt-1 text-sm text-stone-600">
-          {PHASE_INFO.lobby.studentHint} Cet écran se mettra à jour automatiquement.
+          {t(PHASE_INFO.lobby.studentHint)} {t('Cet écran se mettra à jour automatiquement.')}
         </p>
         {data.me.team && (
           <div className="mt-4 rounded-xl bg-emerald-50 p-4">
@@ -219,13 +252,16 @@ function LobbyView({ data }: { data: StudentStateDTO }) {
               {data.me.team.name}
             </p>
             <p className="mt-1 text-sm text-emerald-800">
-              {data.teamMembers.map((m) => m.name).join(' · ') || 'Vous êtes seul pour le moment'}
+              {data.teamMembers.map((m) => m.name).join(' · ') ||
+                t('Vous êtes seul pour le moment')}
             </p>
           </div>
         )}
         {!data.me.team && (
           <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
-            Vous n&apos;êtes pas encore dans une équipe — votre professeur va vous en attribuer une.
+            {t(
+              'Vous n’êtes pas encore dans une équipe — votre professeur va vous en attribuer une.'
+            )}
           </p>
         )}
       </div>
@@ -236,15 +272,16 @@ function LobbyView({ data }: { data: StudentStateDTO }) {
 // ================= Feedback du professeur =================
 
 function FeedbackView({ data }: { data: StudentStateDTO }) {
+  const { t } = useI18n()
   const myScore = data.myIratAnswers.reduce((s, a) => s + (a.score ?? 0), 0)
   const teamScore = data.teamTratAnswers.reduce((s, a) => s + a.score, 0)
   const statsByQuestion = new Map((data.iratStats ?? []).map((s) => [s.questionId, s.percent]))
 
   return (
     <div className="space-y-4">
-      <InfoCard tone="emerald" title="Écoutez votre professeur">
-        {PHASE_INFO.feedback.studentHint} En attendant, voici vos résultats et les réponses
-        correctes.
+      <InfoCard tone="emerald" title={t('Écoutez votre professeur')}>
+        {t(PHASE_INFO.feedback.studentHint)}{' '}
+        {t('En attendant, voici vos résultats et les réponses correctes.')}
       </InfoCard>
 
       <div className="grid grid-cols-2 gap-3">
@@ -253,14 +290,14 @@ function FeedbackView({ data }: { data: StudentStateDTO }) {
             {myScore}
             <span className="text-sm text-stone-400">/{data.questions.length}</span>
           </p>
-          <p className="text-xs text-stone-500">Mon score iRAT</p>
+          <p className="text-xs text-stone-500">{t('Mon score iRAT')}</p>
         </div>
         <div className="rounded-2xl border border-stone-200 bg-white p-4 text-center">
           <p className="text-2xl font-bold text-emerald-700">
             {teamScore}
             <span className="text-sm text-stone-400">/{data.questions.length * 4}</span>
           </p>
-          <p className="text-xs text-stone-500">Score tRAT de mon équipe</p>
+          <p className="text-xs text-stone-500">{t('Score tRAT de mon équipe')}</p>
         </div>
       </div>
 
@@ -269,7 +306,9 @@ function FeedbackView({ data }: { data: StudentStateDTO }) {
         const percent = statsByQuestion.get(q.id)
         return (
           <div key={q.id} className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-            <p className="text-sm font-bold text-stone-500">Question {qi + 1}</p>
+            <p className="text-sm font-bold text-stone-500">
+              {t('Question {n}', { n: qi + 1 })}
+            </p>
             <p className="mt-1 font-semibold leading-snug text-stone-900">{q.text}</p>
             <div className="mt-3 space-y-1.5">
               {q.choices.map((c, ci) => {
@@ -289,18 +328,18 @@ function FeedbackView({ data }: { data: StudentStateDTO }) {
             </div>
             <div className="mt-2.5 flex items-center justify-between text-xs text-stone-500">
               <span>
-                Ma réponse :{' '}
+                {t('Ma réponse :')}{' '}
                 {myAnswer ? (
                   myAnswer.isCorrect ? (
-                    <span className="font-bold text-emerald-600">correcte ✓</span>
+                    <span className="font-bold text-emerald-600">{t('correcte ✓')}</span>
                   ) : (
-                    <span className="font-bold text-red-500">incorrecte</span>
+                    <span className="font-bold text-red-500">{t('incorrecte')}</span>
                   )
                 ) : (
-                  'pas répondu'
+                  t('pas répondu')
                 )}
               </span>
-              {percent !== undefined && <span>{percent}% de la classe a réussi</span>}
+              {percent !== undefined && <span>{t('{n}% de la classe a réussi', { n: percent })}</span>}
             </div>
           </div>
         )
@@ -311,106 +350,174 @@ function FeedbackView({ data }: { data: StudentStateDTO }) {
 
 // ================= Fin de séance =================
 
-function FinishedView({ data, onExit }: { data: StudentStateDTO; onExit: () => void }) {
-  const grade = gradeForStudentSelf(data)
+function FinishedView({
+  data,
+  token,
+  refresh,
+  onExit,
+}: {
+  data: StudentStateDTO
+  token: string
+  refresh: () => Promise<unknown>
+  onExit: () => void
+}) {
+  // v2.6.0 : l'étudiant doit d'abord répondre au questionnaire de fin de
+  // séance (TBL-SAI) pour accéder à sa note et à son rang. La note et le
+  // rang ne sont transmis par le serveur qu'APRÈS la soumission : ce
+  // verrou ne peut pas être contourné depuis le navigateur.
+  if (!data.me.saiCompletedAt) {
+    return <SaiQuestionnaire data={data} token={token} refresh={refresh} onExit={onExit} />
+  }
+  return <FinalResults data={data} onExit={onExit} />
+}
 
-  // Réponses correctes : questions de préparation puis cas cliniques
-  const appCases = data.appCases ?? []
-  const caseQuestions = (caseId: string) =>
-    data.applicationQuestions.filter((q) => q.caseId === caseId)
-  const freeAppQuestions = data.applicationQuestions.filter((q) => !q.caseId)
+// ---------- Questionnaire TBL-SAI (avant l'accès à la note) ----------
+
+function SaiQuestionnaire({
+  data,
+  token,
+  refresh,
+  onExit,
+}: {
+  data: StudentStateDTO
+  token: string
+  refresh: () => Promise<unknown>
+  onExit: () => void
+}) {
+  const { t } = useI18n()
+  const items = data.saiItems ?? []
+  // Réponses locales : id d'item -> valeur 1 à 5
+  const [answers, setAnswers] = useState<Record<string, number>>({})
+  const [comment, setComment] = useState('')
+  const [error, setError] = useState('')
+  const [sending, setSending] = useState(false)
+
+  const answered = Object.keys(answers).length
+  // Questionnaire sans items (séance personnalisée) : envoi direct.
+  const allAnswered = answered === items.length
+
+  const submit = async () => {
+    if (!allAnswered || sending) {
+      setError(t('Répondez à toutes les questions pour continuer.'))
+      return
+    }
+    setError('')
+    setSending(true)
+    try {
+      await api('/api/sai', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          responses: items.map((it) => ({ itemId: it.id, value: answers[it.id] })),
+          comment: comment.trim() || undefined,
+        }),
+      })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('Erreur inconnue.'))
+      setSending(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
-      <div className="rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-6 text-center">
-        <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-600 text-white">
-          <Trophy className="h-7 w-7" />
-        </span>
-        <p className="mt-3 text-lg font-bold text-emerald-900">Séance terminée, bravo !</p>
+      {/* En-tête */}
+      <div className="rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-5 text-center">
+        <p className="text-lg font-bold text-emerald-900">
+          {t('Séance terminée, bravo !')}
+        </p>
+        <p className="mt-1 text-sm font-semibold text-emerald-800">
+          {t('Questionnaire de fin de séance')}
+        </p>
         <p className="mt-1 text-sm text-emerald-800">
-          Merci pour votre participation. Voici votre résultat.
+          {t('Répondez à ce questionnaire pour accéder à votre note et à votre rang.')}
         </p>
       </div>
 
-      {/* Note finale sur 20 — sans détails, comme demandé */}
-      {grade.final !== null && (
-        <div className="rounded-2xl border-2 border-stone-800 bg-stone-900 p-6 text-center shadow-lg">
-          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">
-            Ma note finale
-          </p>
-          <p className="mt-1 text-5xl font-black text-white">
-            {fmtNote(grade.final)}
-            <span className="text-xl font-bold text-stone-400"> / 20</span>
-          </p>
-        </div>
-      )}
-
-      {/* Réponses correctes */}
-      <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
-        <p className="mb-3 text-sm font-bold text-stone-800">Réponses correctes</p>
-        <div className="space-y-2">
-          {data.questions.map((q, qi) => (
-            <div key={q.id} className="rounded-xl bg-stone-50 p-3">
-              <p className="text-sm font-medium text-stone-800">
-                Q{qi + 1}. {q.text}
-              </p>
-              <p className="mt-1 text-xs text-stone-600">
-                Bonne réponse :{' '}
-                <strong className="text-emerald-700">
-                  {choiceLetter(q.correct ?? 0)} — {q.choices[q.correct ?? 0]}
-                </strong>
-              </p>
-            </div>
-          ))}
-
-          {appCases.map((c, ci) => (
-            <div key={c.id} className="rounded-xl border border-lime-200 bg-lime-50/60 p-3">
-              <p className="text-sm font-bold text-lime-800">
-                Application {ci + 1} — {c.title}
-              </p>
-              <div className="mt-2 space-y-2">
-                {caseQuestions(c.id).map((q, qi) => (
-                  <div key={q.id} className="rounded-lg bg-white p-2.5">
-                    <p className="text-sm font-medium text-stone-800">
-                      Q{qi + 1}. {q.text}
-                    </p>
-                    <p className="mt-1 text-xs text-stone-600">
-                      Bonne réponse :{' '}
-                      <strong className="text-emerald-700">
-                        {q.correct !== undefined
-                          ? `${choiceLetter(q.correct)} — ${q.choices[q.correct]}`
-                          : '—'}
-                      </strong>
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-
-          {freeAppQuestions.length > 0 && (
-            <div className="rounded-xl border border-lime-200 bg-lime-50/60 p-3">
-              <p className="text-sm font-bold text-lime-800">Exercices d&apos;application</p>
-              <div className="mt-2 space-y-2">
-                {freeAppQuestions.map((q, qi) => (
-                  <div key={q.id} className="rounded-lg bg-white p-2.5">
-                    <p className="text-sm font-medium text-stone-800">
-                      Ex. {qi + 1}. {q.text}
-                    </p>
-                    <p className="mt-1 text-xs text-stone-600">
-                      Bonne réponse :{' '}
-                      <strong className="text-emerald-700">
-                        {q.correct !== undefined
-                          ? `${choiceLetter(q.correct)} — ${q.choices[q.correct]}`
-                          : '—'}
-                      </strong>
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
+      {/* Consignes de l'instrument */}
+      <InfoCard tone="emerald" title={t('Questionnaire de fin de séance')}>
+        <p className="leading-relaxed">
+          {t(
+            'Ce questionnaire porte sur votre expérience avec l’apprentissage par équipes (TBL). Il n’y a ni bonnes ni mauvaises réponses. Répondez honnêtement et indiquez votre réaction réelle à chaque question.'
           )}
+        </p>
+        <p className="mt-2 text-xs font-semibold text-stone-600">
+          {t('L’échelle est la même pour toutes les affirmations :')}
+        </p>
+        <div className="mt-1.5 grid grid-cols-1 gap-1 text-xs text-stone-600 sm:grid-cols-2">
+          {SAI_LIKERT_KEYS.map((label, i) => (
+            <p key={label}>
+              <span className="font-mono font-bold text-stone-800">{i + 1}</span> — {t(label)}
+            </p>
+          ))}
         </div>
+      </InfoCard>
+
+      {/* Une section par sous-échelle */}
+      {SAI_SUBSCALES.map((sub) => {
+        const sectionItems = items.filter((it) => it.subscale === sub)
+        if (sectionItems.length === 0) return null
+        const info = SAI_SUBSCALE_INFO[sub]
+        return (
+          <section key={sub} className="space-y-2.5">
+            <div className="rounded-xl bg-stone-100 px-4 py-3">
+              <p className="text-sm font-bold text-stone-800">{t(info.labelKey)}</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-stone-500">
+                {t(info.descriptionKey)}
+              </p>
+            </div>
+            {sectionItems.map((it) => (
+              <SaiItemRow
+                key={it.id}
+                item={it}
+                value={answers[it.id]}
+                onPick={(v) => setAnswers((prev) => ({ ...prev, [it.id]: v }))}
+              />
+            ))}
+          </section>
+        )
+      })}
+
+      {/* Commentaire facultatif */}
+      <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+        <label htmlFor="sai-comment" className="text-sm font-bold text-stone-800">
+          {t(
+            'Si vous le souhaitez, ajoutez un commentaire sur votre expérience de l’apprentissage par équipes :'
+          )}{' '}
+          <span className="font-normal text-stone-400">{t('(facultatif)')}</span>
+        </label>
+        <Textarea
+          id="sai-comment"
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          rows={3}
+          maxLength={1000}
+          className="mt-2 resize-none text-[15px]"
+        />
+      </div>
+
+      {/* Progression + envoi */}
+      <div className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+        <p className="text-center text-sm font-semibold text-stone-600">
+          {t('{n} / {total} réponses', { n: answered, total: items.length })}
+        </p>
+        {error && (
+          <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {error}
+          </p>
+        )}
+        <Button
+          onClick={submit}
+          disabled={sending || answered < items.length}
+          className="h-12 w-full bg-emerald-600 text-base hover:bg-emerald-700"
+        >
+          {sending ? t('Envoi en cours…') : t('Envoyer mes réponses')}
+        </Button>
+        {answered < items.length && (
+          <p className="text-center text-xs text-stone-500">
+            {t('Répondez à toutes les questions pour continuer.')}
+          </p>
+        )}
       </div>
 
       <Button
@@ -418,7 +525,120 @@ function FinishedView({ data, onExit }: { data: StudentStateDTO; onExit: () => v
         onClick={onExit}
         className="h-11 w-full border-stone-300 text-stone-600"
       >
-        Retour à l&apos;accueil
+        {t('Retour à l’accueil')}
+      </Button>
+    </div>
+  )
+}
+
+function SaiItemRow({
+  item,
+  value,
+  onPick,
+}: {
+  item: SaiItemDTO
+  value: number | undefined
+  onPick: (v: number) => void
+}) {
+  const { t } = useI18n()
+  const text = saiItemText(item)
+  return (
+    <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm">
+      <p className="text-sm font-medium leading-relaxed text-stone-800">{t(text)}</p>
+      <div
+        className="mt-3 grid grid-cols-5 gap-1.5"
+        role="radiogroup"
+        aria-label={t(text)}
+      >
+        {SAI_LIKERT_KEYS.map((label, i) => {
+          const v = i + 1
+          const selected = value === v
+          return (
+            <button
+              key={v}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-label={`${v} — ${t(label)}`}
+              onClick={() => onPick(v)}
+              className={
+                'flex h-11 min-h-11 items-center justify-center rounded-xl border-2 text-base font-bold transition-all active:scale-95 ' +
+                (selected
+                  ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm'
+                  : 'border-stone-200 bg-white text-stone-600 hover:border-emerald-300 hover:bg-emerald-50')
+              }
+            >
+              {v}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ---------- Résultats : note finale + rang (après le questionnaire) ----------
+
+function FinalResults({ data, onExit }: { data: StudentStateDTO; onExit: () => void }) {
+  const { t } = useI18n()
+  const note = data.finalNote ?? null
+  const rank = data.myRank ?? null
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-6 text-center">
+        <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-600 text-white">
+          <Trophy className="h-7 w-7" />
+        </span>
+        <p className="mt-3 text-lg font-bold text-emerald-900">
+          {t('Séance terminée, bravo !')}
+        </p>
+        <p className="mt-1 text-sm text-emerald-800">
+          {t('Merci d’avoir partagé votre expérience !')}
+        </p>
+        <p className="mt-1 text-sm text-emerald-800">
+          {t('Merci pour votre participation. Voici votre résultat.')}
+        </p>
+      </div>
+
+      {/* Note finale sur 20 — calculée par le serveur, sans détail des
+          composantes et SANS les corrections (protection anti-divulgation) */}
+      {note !== null && (
+        <div className="rounded-2xl border-2 border-stone-800 bg-stone-900 p-6 text-center shadow-lg">
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400">
+            {t('Ma note finale')}
+          </p>
+          <p className="mt-1 text-5xl font-black text-white">
+            {fmtNote(note)}
+            <span className="text-xl font-bold text-stone-400"> / 20</span>
+          </p>
+        </div>
+      )}
+
+      {/* Rang parmi les étudiants notés de la séance — uniquement le
+          sien : aucun classement des autres étudiants n'est affiché */}
+      {rank !== null && (
+        <div className="rounded-2xl border-2 border-emerald-700 bg-white p-6 text-center shadow-lg">
+          <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
+            {t('Mon rang')}
+          </p>
+          <p className="mt-1 text-4xl font-black text-emerald-800">
+            {t('Rang {rank} / {total}', { rank: rank.rank, total: rank.total })}
+          </p>
+          <p className="mt-2 text-sm text-stone-500">
+            {t('Votre position parmi les {total} étudiants notés de la séance.', {
+              total: rank.total,
+            })}
+          </p>
+        </div>
+      )}
+
+      <Button
+        variant="outline"
+        onClick={onExit}
+        className="h-11 w-full border-stone-300 text-stone-600"
+      >
+        {t('Retour à l’accueil')}
       </Button>
     </div>
   )

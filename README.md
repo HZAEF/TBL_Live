@@ -8,10 +8,17 @@ Application web gratuite qui déroule **toutes les étapes de la méthode TBL** 
 - ✅ **Feedback** — statistiques en direct pour cibler votre mini-cours
 - ✅ **Cas cliniques d'application** — chaque cas (énoncé + 3 à 5 QCU) s'affiche un par un ; les réponses sont enregistrées automatiquement au clic et **révélées automatiquement** dès que toutes les équipes ont répondu
 - ✅ **Évaluation par les pairs** — chaque étudiant note ses coéquipiers
-- ✅ **Résultats** — tableaux complets + export CSV pour Excel (formats « 10 sur 10 » insensibles à la conversion en date, cellules neutralisées contre les injections de formules)
-- ✅ **Sécurité renforcée** — PIN enseignant à 6 caractères minimum avec verrouillage automatique (5 tentatives → 15 minutes de blocage), code de reprise personnel pour chaque étudiant, jusqu'à **50 équipes** par séance
-- ✅ **Gestion des séances** — suppression avec **confirmation** et **corbeille de 48 h** (restauration en un clic), **duplication** d'une séance (questions et cas cliniques copiés, sans les données des étudiants), **purge automatique** des données étudiantes après 4 mois (les QCM et cas cliniques sont conservés)
-- ✅ Installable sur l'écran d'accueil des téléphones (PWA), sans magasin d'applications
+- ✅ **Résultats** — tableaux complets + **export Excel à 3 feuilles** (« Résultats », « Docimologie », « Questionnaire d'évaluation » — vrai fichier `.xlsx` généré sans dépendance) ; export CSV conservé en secours
+- ✅ **Statistiques docimologiques** — onglet dédié du tableau de bord : indice de difficulté (p), discrimination (D), corrélation point-bisériale, fidélité (KR-20/alpha), SEM, analyse des distracteurs, IF-AT 4/2/1/0, effet équipe iRAT→tRAT, questions à revoir — avec **export CSV pour Excel** et glossaire pédagogique dépliable
+- ✅ **9 langues** — sélecteur compact à drapeaux dans l'en-tête : français (défaut), anglais, espagnol, allemand, **italien, turc**, chinois, russe, arabe (droite-à-gauche) ; interface, messages d'erreur, questionnaire TBL-SAI et exports entièrement traduits, terminologie scientifique soignée ; le choix est mémorisé par appareil
+- ✅ **Sécurité renforcée** — PIN enseignant à 6 caractères minimum, **stocké haché (bcrypt)** en base de données, avec verrouillage automatique (5 tentatives → 15 minutes de blocage), jeton d'accès transmis par en-tête chiffré, comparaisons en temps constant, en-têtes de sécurité HTTP (CSP), **code personnel choisi par chaque étudiant** (4 caractères minimum, obligatoire à la première connexion), jusqu'à **50 équipes** par séance
+- ✅ **Gestion des séances** — suppression avec **confirmation** et **corbeille de 48 h** (restauration en un clic), **duplication** d'une séance (questions et cas cliniques copiés, sans les données des étudiants), **purge automatique** des données étudiantes après 4 mois (les QCM et cas cliniques sont conservés), **téléchargement/téléversement de séance** (export JSON complet, restauration sur n'importe quel appareil via l'onglet « Configurations »)
+- ✅ **Mode réseau local** — `npm run lan` sur l'ordinateur enseignant : les étudiants sans internet se connectent au Wi-Fi de la salle via votre ordinateur (qui fait relais vers la base en ligne) ; même séance, même code, **synchronisation en temps réel** avec les étudiants connectés par leur propre internet ; un étudiant qui change de chemin retrouve son compte par nom + code personnel (aucun doublon)
+- ✅ **Onglet « Configurations »** — réglages de la séance réunis : **titre modifiable** (action « Enregistrer le titre »), durée du iRAT, **téléchargement de la séance** (bouton déplacé ici depuis l'en-tête), **téléversement d'une séance déjà téléchargée** (restauration complète : nouvelle séance, identifiants recréés, étudiants retrouvés par nom + code personnel, nouveau PIN choisi), **exclusion d'un étudiant** (avec confirmation) et guide du mode réseau local
+- ✅ Installable sur l'écran d'accueil des téléphones (PWA — service worker inclus, vraie installation autonome sur Android/Chrome et iOS), sans magasin d'applications
+- ✅ **Protection anti-capture** — filigrane nominatif (nom · code de séance · horodatage rafraîchi toutes les 30 s) répété sur tout l'écran étudiant, flou automatique dès que l'onglet passe en arrière-plan (aperçu des applications récentes, enregistrement d'écran), anti-copie (sélection de texte, menu contextuel, impression bloquée) et **onglet « Signalements » dédié dans le tableau de bord enseignant** (juste après « Réclamations », avec pastille du nombre) : sortie de l'application pendant les tests (fiable sur tous les appareils) et suspicion de capture d'écran sur ordinateur (Impr. écran, Cmd+Shift+3/4/5, Win+Shift+S), **divisés par étudiant et par épreuve** (iRAT, tRAT, application/cas cliniques) — présentés comme des indices à interpréter, jamais des preuves ; en fin d'épreuve iRAT/tRAT, les étudiants voient une carte verte « Épreuve terminée » (plus de « Question suivante » sans objet)
+- ✅ **Fin de séance repensée (TBL-SAI)** — l'étudiant choisit son **code personnel** (4 caractères minimum, chiffres ou lettres, obligatoire en saisissant son nom) qui lui permet de revenir dans sa séance sur tout appareil ; à la fin, il répond d'abord au **questionnaire TBL-SAI** (33 items de Mennenga, 3 sous-échelles, Likert 1-5, entièrement traduit dans les 9 langues) — verrou serveur : **tant qu'il n'a pas soumis, sa note finale /20 et son rang « Rang X / N » restent invisibles** (classement sportif, ex æquo partagés, jamais les résultats des autres) ; **plus aucun corrigé sur la page finale** (protection contre la divulgation hors classe — le corrigé reste visible pendant la phase de réclamations) ; l'enseignant adapte le questionnaire dans un **onglet « Questionnaire » dédié** (libellés modifiables, ajout/suppression d'items, réinitialisation, statistiques par sous-échelle et commentaires des étudiants) et un **bouton en bas de la page de création** permet de le personnaliser avant de créer la séance
+- ✅ **Mises à jour sans perte** — le schéma de base s'applique en mode prudence : changements additifs automatiques, toute opération destructrice **arrête le déploiement** avec un message clair (jamais de `--accept-data-loss` silencieux) ; calculs docimologiques couverts par des tests automatiques (`npm test`)
 
 ---
 
@@ -32,18 +39,18 @@ L'application vous guide étape par étape. Le bouton vert en bas passe d'une é
 
 | Étape | Ce que vous faites | Ce que font les étudiants |
 |---|---|---|
-| 1. Accueil | Affichez le code au tableau | Ils saisissent le code + leur **nom et prénom**, choisissent leur équipe, et reçoivent un **code de reprise personnel** à noter (il sert à retrouver leur séance sur un autre appareil) |
+| 1. Accueil | Affichez le code au tableau | Ils saisissent le code + leur **nom et prénom** ET **choisissent leur code personnel** (4 caractères minimum, chiffres ou lettres — obligatoire) qui leur permettra de retrouver leur séance sur un autre appareil |
 | 2. iRAT | Surveillez la progression en direct | Chacun répond **seul** sur son téléphone |
 | 3. tRAT | Surveillez les scores des équipes | **Un téléphone par équipe** : ils discutent puis valident (4 / 2 / 1 / 0 pt) |
 | 4. Réclamations | Suivez le compteur « équipes ayant répondu » | Chaque équipe écrit ses contestations puis clique **« Nous n'avons pas de réclamation »** — quand toutes ont répondu, la phase suivante s'ouvre **automatiquement** |
 | 5. Feedback | Mini-cours ciblé sur les questions en rouge | Ils voient leurs résultats et les bonnes réponses |
 | 6. Application | Suivez la révélation automatique (ou forcez-la) | Les équipes travaillent les **cas cliniques un par un** ; chaque réponse est enregistrée **automatiquement** au clic ; les réponses de chaque question sont **révélées automatiquement** dès que toutes les équipes ont répondu |
 | 7. Pairs | Vérifiez que tout le monde a soumis | Chacun note ses coéquipiers (1 à 5) |
-| 8. Terminé | Exportez le CSV pour vos notes | Ils voient **leur note finale sur 20**, puis les réponses correctes |
+| 8. Terminé | Exportez le CSV pour vos notes ; ouvrez l'onglet **Statistiques** pour l'analyse docimologique complète | Ils répondent au **questionnaire TBL-SAI** (obligatoire), puis voient **leur note finale sur 20 et leur rang** — sans les réponses correctes (protection anti-divulgation) |
 
 ### Après la séance
 - Onglet **« Résultats »** → tableau **« Note finale sur 20 »** en haut de la page : chaque étudiant voit sa note globale combinant **iRAT 25 % · tRAT 25 % · application 35 % · évaluation par les pairs 15 %**. Chaque partie est d'abord ramenée sur 20 (iRAT : 1 point par bonne réponse ; tRAT : barème 4/2/1/0 ; application : bonnes réponses de l'équipe ; pairs : moyenne reçue sur 5). Si une partie n'existe pas (aucun exercice d'application, évaluation manquante…), son poids est automatiquement redistribué sur les autres.
-- Les étudiants voient **uniquement leur note finale sur 20** sur l'écran de fin (sans détail), suivie des **réponses correctes** de toutes les questions.
+- Les étudiants voient **uniquement leur note finale sur 20 et leur rang** (« Rang X / N ») sur l'écran de fin, **après** avoir répondu au questionnaire TBL-SAI — les réponses correctes n'y figurent plus (elles restent visibles pendant la phase de réclamations, sous votre conduite).
 - Bouton **« Exporter tous les résultats (CSV) »** : un fichier Excel avec tout (détail question par question, notes /20 de chaque partie, note finale, réclamations, commentaires). Les scores s'écrivent « 10 sur 10 » (et non « 10/10 ») pour éviter qu'Excel les convertisse en dates (10-oct).
 - Pour reprendre une séance : **« Reprendre une séance »** avec le code + votre PIN.
 
@@ -73,95 +80,55 @@ L'icône apparaît alors comme une vraie application, en plein écran.
 
 ---
 
-MISE EN SERVICE DANS UN NOUVEAU PROJET GITHUB (première installation)
-----------------------------------------------------------------------
-Suivez les étapes A à E du README.md inclus (comme pour votre première
-installation) :
+## 3. Héberger l'application GRATUITEMENT et définitivement
 
-  Étape A — Compte GitHub (si vous en avez déjà un, passez à B).
-  Étape B — Créez un NOUVEAU dépôt (repository) GitHub, par exemple
-            « tbl-live-v2 », puis glissez-déposez le CONTENU de ce ZIP
-            (tous les fichiers et dossiers extraits) via
-            « Add file » → « Upload files » → « Commit changes ».
-  Étape C — Créez un NOUVEAU projet sur https://neon.com (Sign up avec
-            GitHub, « Create project », région proche de vous) et copiez
-            la chaîne de connexion PostgreSQL.
-  Étape D — Sur https://vercel.com (« Continue with GitHub ») :
-            « Add New… » → « Project » → Importez le dépôt tbl-live-v2.
-            AVANT de déployer, ajoutez la variable d'environnement :
-              Key   : DATABASE_URL
-              Value : la chaîne de connexion Neon copiée à l'étape C
-            puis « Deploy » (2-3 minutes).
-            ✔ Plus RIEN à modifier dans les fichiers : la base est déjà
-            configurée pour Neon (PostgreSQL) et ses tables se créent
-            toutes seules pendant le déploiement.
-  Étape E — Ouvrez l'adresse https://tbl-live-v2-xxxx.vercel.app :
-            c'est la NOUVELLE adresse à donner à vos étudiants.
+L'application fonctionne déjà dans l'aperçu. Pour en disposer **en permanence**, hébergez-la gratuitement sur **Vercel** (avec une base de données **Neon**, gratuite elle aussi). Comptez **30 à 40 minutes**, une seule fois. Aucune connaissance technique n'est nécessaire : suivez simplement les clics.
 
-Important : créez un NOUVEAU projet Neon (base vierge) pour cette
-version — ne réutilisez pas la chaîne de connexion de l'ancienne
-installation : la structure de la base a évolué et doit partir d'une
-base neuve. L'ancienne application peut rester en ligne le temps de
-valider la nouvelle ; vous pourrez ensuite la supprimer sur Vercel
-(Paramètres du projet → Delete) pour éviter tout risque de confusion
-entre les deux adresses.
+### Étape A — Créer un compte GitHub (2 min)
+1. Allez sur **https://github.com/signup**.
+2. Créez votre compte (email + mot de passe).
 
-SI LE DÉPLOIEMENT ÉCHOUE (« Error: Command "npm run build" exited with 1 »)
----------------------------------------------------------------------------
-1. Erreur au DÉBUT du build (par ex. « Validation Error », « error: Env
-   var not found: DATABASE_URL », « P1001 ») : vérifiez DATABASE_URL dans
-   Vercel — votre projet → onglet « Settings » → « Environment Variables »
-   → il doit y avoir DATABASE_URL avec la chaîne du NOUVEAU projet Neon
-   (elle commence par postgresql:// et se termine par ?sslmode=require).
-   Après l'avoir ajoutée ou corrigée : onglet « Deployments » → menu « … »
-   du déploiement → « Redeploy ». Vérifiez aussi sur GitHub que
-   prisma/schema.prisma contient bien : provider = "postgresql"
-   (automatique avec ce ZIP v2.1.2).
-2. Erreur à la FIN du build (« ENOENT … .next/next-server.js.nft.json ») :
-   corrigée par la v2.1.2 — assurez-vous que le dossier « scripts/ » et le
-   fichier « package-lock.json » ont bien été téléversés sur GitHub
-   (présents dans ce ZIP), puis « Redeploy ».
-3. N'utilisez pas la chaîne de l'ANCIEN projet Neon : créez un projet
-   Neon neuf comme indiqué à l'étape C.
-4. Si l'échec persiste : onglet « Deployments » → cliquez sur le
-   déploiement en erreur → « Building » → repérez les dernières lignes
-   rouges du journal et transmettez-les : elles permettent un diagnostic
-   exact.
+### Étape B — Déposer le code sur GitHub (5 min)
+1. Connectez-vous, cliquez en haut à droite sur **« + »** → **« New repository »**.
+2. Nommez-le par exemple `tbl-live`, laissez tout par défaut, cliquez **« Create repository »**.
+3. Sur la page suivante, cliquez sur **« uploading an existing file »** (lien au-dessus de la zone vide).
+4. Glissez-déposez le **contenu du dossier décompressé** `tbl-live-v2-1-1-nouveau-projet.zip` (tous les fichiers et dossiers extraits — le dossier `node_modules` n'y figure pas, tout est prêt à déposer).
+5. Cliquez sur **« Commit changes »**.
 
-CÔTÉ VERCEL ET NEON, ENSUITE ?
-------------------------------
-- Rien à faire manuellement : à chaque « Commit changes » sur GitHub,
-  Vercel redéploie automatiquement (2-3 min) et applique les éventuelles
-  évolutions de la base de données à Neon tout seul.
-- La purge des données étudiantes et le vidage de la corbeille se font
-  tout seuls quand vous ouvrez vos séances : aucun réglage à faire.
-- Sur les téléphones : fermer puis rouvrir l'application installée pour
-  voir la nouvelle version (ou recharger deux fois).
+### Étape C — Créer la base de données gratuite sur Neon (5 min)
+1. Allez sur **https://neon.com** → **« Sign up »** (avec GitHub, c'est le plus simple).
+2. Dans votre espace : **« Create project »** → nommez-le `tbl-live` → région au plus près de chez vous → **« Create »**.
+3. Sur la page du projet, cherchez la **chaîne de connexion** (bouton **« Connect »** ou « Connection string »). Elle ressemble à :
+   `postgresql://neondb_owner:xxxx@ep-xxx.eu-central-1.aws.neon.tech/neondb?sslmode=require`
+4. **Copiez-la** et gardez-la (elle servira à l'étape D).
 
-POUR ESSAYER LOCALEMENT SUR VOTRE ORDINATEUR (optionnel, sans Internet)
-------------------------------------------------------------------------
-1. Installez Node.js (version LTS) depuis https://nodejs.org.
-2. Décompressez ce ZIP dans un dossier, ouvrez un terminal dans ce dossier.
-3. Dans prisma/schema.prisma, remplacez « postgresql » par « sqlite »
-   (une seule ligne, le temps du test local — ce dossier ne servira qu'en
-   local, il ne touche ni GitHub ni Neon).
-4. Créez le fichier .env contenant la ligne :  DATABASE_URL="file:./dev.db"
-   (sous PowerShell : Set-Content -Path .env -Value 'DATABASE_URL="file:./dev.db"')
-5. Tapez :  npm install   puis :  npm run build
-   (fonctionne désormais aussi sous Windows, les copies de fichiers sont
-   faites par un petit programme multiplateforme)
-6. Lancez :  node .next/standalone/server.js
-   puis ouvrez http://localhost:3000 dans votre navigateur.
+### Étape D — Déployer sur Vercel (10 min)
+1. Allez sur **https://vercel.com** → **« Sign Up »** → **« Continue with GitHub »**.
+2. Cliquez sur **« Add New… »** → **« Project »**.
+3. Votre dépôt `tbl-live` apparaît : cliquez **« Import »**.
+4. **Avant de déployer**, ouvrez la section **« Environment Variables »** et ajoutez :
+   - **Key** (nom) : `DATABASE_URL`
+   - **Value** (valeur) : la chaîne de connexion Neon copiée à l'étape C.
+   - Cliquez **« Add »**.
+5. Cliquez sur **« Deploy »** et attendez 2-3 minutes.
+6. 🎉 Votre application est en ligne ! Vercel vous donne une adresse du type
+   `https://tbl-live-xxxx.vercel.app` — c'est **cette adresse** que vous donnerez à vos étudiants.
 
-Bonne séance TBL !
+> ℹ️ Depuis la version 2.1.1, **plus aucune modification de fichier n'est nécessaire** : le fichier
+> `prisma/schema.prisma` est déjà configuré pour PostgreSQL (Neon), et les tables de la base se
+> créent toutes seules pendant le premier déploiement.
+
+### Étape E — Vérifier (2 min)
+1. Ouvrez l'adresse Vercel : l'application doit s'afficher.
+2. Créez une séance de test, puis vérifiez dans Neon que les tables sont apparues.
 
 ---
 
 ## 4. Questions fréquentes
 
-**Un étudiant a perdu sa connexion ou change de téléphone ?** Il rouvre l'application, saisit le même code, **le même nom** et son **code de reprise personnel** (affiché à sa première connexion, disponible dans la séance via la puce « code », ou redonné par l'enseignant dans l'onglet Équipes) : il retrouve son équipe et toutes ses réponses. Sans ce code, personne ne peut prendre sa place — même en connaissant son nom.
+**Un étudiant a perdu sa connexion ou change de téléphone ?** Il rouvre l'application, saisit le même code, **le même nom** et son **code personnel** (celui qu'il a choisi à sa première connexion ; vous pouvez aussi le lui redonner depuis l'onglet Équipes) : il retrouve son équipe et toutes ses réponses. Sans ce code, personne ne peut prendre sa place — même en connaissant son nom.
 
-**Un étudiant a oublié son code de reprise ?** Ouvrez l'onglet **Équipes** du tableau de bord : le code de chaque étudiant apparaît en petit à côté de son nom.
+**Un étudiant a oublié son code personnel ?** Ouvrez l'onglet **Équipes** du tableau de bord : le code de chaque étudiant apparaît en petit à côté de son nom.
 
 **J'ai oublié mon PIN et je suis bloqué par le verrouillage ?** Le verrouillage dure 15 minutes maximum — patientez puis réessayez. Après 5 tentatives fausses, la connexion est temporairement bloquée : c'est une protection contre les essais répétés par des étudiants malins.
 
@@ -177,9 +144,12 @@ Bonne séance TBL !
 
 **Un étudiant arrive en retard pendant le iRAT ?** Il peut répondre tant que la phase est ouverte. Vous pouvez aussi revenir à une phase précédente (cliquez sur son numéro dans le fil des étapes en haut du tableau de bord).
 
-**Combien d'étudiants ?** L'application est conçue pour des classes de 5 à 150 étudiants. Pour de très grandes classes, le rafraîchissement peut être légèrement moins instantané (toutes les 2,5 s).
+**Combien d'étudiants ?** L'application est conçue pour des classes de 5 à 150 étudiants. Pendant les tests, le rafraîchissement se fait toutes les 2,5 s ; pendant les phases d'attente, le téléphone interroge le serveur deux fois moins souvent (la charge reste légère pour la base gratuite).
 
-**Les données sont-elles privées ?** Les séances ne sont accessibles qu'avec le code à 6 caractères, et le tableau de bord enseignant est protégé par votre PIN (verrouillage automatique après 5 tentatives incorrectes). Deux élèves homonymes ne peuvent pas « s'éjecter » : chacun garde son compte grâce à son code de reprise. N'utilisez pas de données sensibles dans les questions. Aucune donnée n'est partagée avec des tiers.
+**Les données sont-elles privées ?** Les séances ne sont accessibles qu'avec le code à 6 caractères, et le tableau de bord enseignant est protégé par votre PIN **haché** (même l'administrateur de la base ne peut pas le lire ; verrouillage automatique après 5 tentatives incorrectes). Deux élèves homonymes ne peuvent pas « s'éjecter » : chacun garde son compte grâce au code personnel qu'il a choisi. N'utilisez pas de données sensibles dans les questions. Aucune donnée n'est partagée avec des tiers.
+
+**Je veux une copie de sécurité de ma séance ?** Bouton **« Sauvegarder »** en haut du tableau de bord : un fichier JSON avec tout (questions, équipes, étudiants avec leurs codes personnels, réponses, réclamations, évaluations, questionnaire TBL-SAI et ses réponses) — sans les secrets (PIN, jetons). À télécharger avant chaque mise à jour de l'application.
 
 ---
+
 Bonne séance TBL ! 🎓
