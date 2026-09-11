@@ -1,22 +1,52 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { withMetrics } from '@/lib/metrics'
 import { db } from '@/lib/db'
 import { getSessionByCode, randomToken, randomRecoveryCode, normalizeName } from '@/lib/tbl'
+import { bumpRevisions } from '@/lib/revision'
+import { withSessionWrite, recordSessionEvent, eventOriginFromHeader } from '@/lib/write-queue'
+import { rateLimit, RATE_JOIN } from '@/lib/rate-limit'
+
+/** Adresse IP du client (x-forwarded-proxy/Vercel/Caddy, sinon socket). */
+function clientIp(req: NextRequest): string {
+  const fwd = req.headers.get('x-forwarded-for')
+  if (fwd) return fwd.split(',')[0].trim()
+  return req.headers.get('x-real-ip') ?? 'local'
+}
 
 // POST /api/join — l'étudiant rejoint une séance
 //
-// v2.6.0 : chaque étudiant CHOISIT lui-même son code personnel (4 à 12
+// v2.6.0 : chaque étudiant CHOISIT lui-même son mot de passe (4 à 12
 // caractères, chiffres et lettres) au moment de saisir son nom — il est
-// OBLIGATOIRE. Ce code permet de reprendre sa séance (autre appareil,
-// navigateur vidé) : pour récupérer son compte, il saisit son nom ET son
-// code personnel. Conséquences :
+// OBLIGATOIRE. Ce mot de passe permet de reprendre sa séance (autre
+// appareil, navigateur vidé) : pour récupérer son compte, il saisit son
+// nom ET son mot de passe. Conséquences :
 //  - impossible d'usurper le compte d'un camarade en connaissant juste son
 //    prénom ;
 //  - deux homonymes ne « s'éjectent » plus mutuellement : le second est
 //    invité à se différencier (nom de famille) au lieu de voler le compte.
 // Les comptes créés avant la v2.6.0 gardent leur code généré (6 caractères)
-// — parfaitement compatible avec la reprise par nom + code.
-export async function POST(req: NextRequest) {
+// — parfaitement compatible avec la reprise par nom + mot de passe.
+// v3.4.0 — VOCABULAIRE : « code personnel » devient « mot de passe »
+// (l'enseignante a signalé la confusion avec le CODE DE LA SÉANCE à
+// 6 caractères — deux « codes » différents dans le même formulaire).
+// Le champ technique garde son nom historique recoveryCode.
+async function doPOST(req: NextRequest) {
   try {
+    // v3.2.0 — garde-fou de débit par IP (audit point n°5) : la rafale
+    // de début de séance est NORMALE (le test de charge valide 150
+    // joins SIMULTANÉS depuis une même IP) → plafond volontairement
+    // très haut (burst 250, 600/min). Seules les vraies boucles
+    // défaillantes (un client qui re-poste /api/join en boucle) sont
+    // freinées — la rafale d'une classe entière passe toujours.
+    const verdict = rateLimit(`join:${clientIp(req)}`, RATE_JOIN)
+    if (!verdict.ok) {
+      const res = NextResponse.json(
+        { error: 'Trop de tentatives — patientez quelques secondes puis réessayez.' },
+        { status: 429 }
+      )
+      res.headers.set('Retry-After', String(verdict.retryAfterSec))
+      return res
+    }
     const body = await req.json().catch(() => null)
     const code = typeof body?.code === 'string' ? body.code : ''
     const name = typeof body?.name === 'string' ? body.name.trim() : ''
@@ -57,9 +87,25 @@ export async function POST(req: NextRequest) {
       (s) => normalizeName(s.name) === normalizeName(name)
     )
 
-    let student
-    let isNew = false
-
+    // v3.1.0 — VERROU D'ÉCRITURE POUR LE JOIN (problème n°2 de l'audit) :
+    // l'ancienne séquence « lire les équipes → compter les membres →
+    // choisir la moins remplie → insérer » n'était PAS atomique : avec
+    // 50 à 150 joins simultanés, des dizaines de requêtes lisaient les
+    // MÊMES compteurs et choisissaient la MÊME équipe (déséquilibre
+    // massif). Tout le bloc est désormais sérialisé par séance :
+    // chaque insertion est suivie du recalcul — la répartition reste
+    // équilibrée MÊME sous une rafale de 150 inscriptions en même
+    // temps (vérifié par le test de charge : écart max ≤ 1). La
+    // contrainte unique du jeton étudiant reste la protection finale
+    // inter-instances (serverless).
+    const origin = eventOriginFromHeader(req.headers.get('x-tbl-origin'))
+    const result = await withSessionWrite(
+      session.id,
+      'join',
+      async (): Promise<
+        | { kind: 'student'; student: { token: string; id: string; name: string; teamId: string | null; recoveryCode: string }; isNew: boolean }
+        | { kind: 'error'; error: string; status: 409 | 400 }
+      > => {
     if (matches.length > 0) {
       // Un compte porte déjà ce nom : il faut le code de reprise pour le
       // récupérer — le prénom seul ne donne plus accès au compte.
@@ -74,29 +120,27 @@ export async function POST(req: NextRequest) {
         if (legacy) match = legacy
       }
       if (!match) {
-        return NextResponse.json(
-          {
-            error:
-              'Ce nom est déjà utilisé dans cette séance. S\u2019il s\u2019agit de vous, saisissez votre code personnel (choisi lors de votre première connexion, visible aussi auprès de votre professeur). Sinon, précisez votre nom (ex. prénom + nom de famille) pour créer votre propre compte.',
-          },
-          { status: 409 }
-        )
+        return {
+          kind: 'error',
+          error:
+            'Ce nom est déjà utilisé dans cette séance. S\u2019il s\u2019agit de vous, saisissez votre mot de passe (choisi lors de votre première connexion, visible aussi auprès de votre professeur). Sinon, précisez votre nom (ex. prénom + nom de famille) pour créer votre propre compte.',
+          status: 409 as const,
+        }
       }
       if (teamId && match.teamId && teamId !== match.teamId) {
-        return NextResponse.json(
-          {
-            error:
-              'Votre compte est rattaché à une autre équipe. Choisissez votre équipe habituelle, ou demandez au professeur de vous déplacer depuis son tableau de bord.',
-          },
-          { status: 409 }
-        )
+        return {
+          kind: 'error',
+          error:
+            'Votre compte est rattaché à une autre équipe. Choisissez votre équipe habituelle, ou demandez au professeur de vous déplacer depuis son tableau de bord.',
+          status: 409 as const,
+        }
       }
       // Code correct (ou compte antérieur à la mise à jour) : on rend son
       // compte avec un nouveau jeton — l'ancien appareil est déconnecté
       // (comportement inchangé). Au passage, un compte sans code de reprise
       // en reçoit un, affiché à l'écran.
       const newCode = match.recoveryCode || randomRecoveryCode()
-      student = await db.student.update({
+      const student = await db.student.update({
         where: { id: match.id },
         data: {
           token: randomToken(),
@@ -104,19 +148,21 @@ export async function POST(req: NextRequest) {
           recoveryCode: newCode,
         },
       })
-      if (!match.recoveryCode) isNew = true // montre le nouveau code à l'écran
-    } else {
-      // v2.6.0 : premier compte pour ce nom — le code personnel choisi par
+      // v2.9.0 : retour d'un étudiant (changement d'équipe possible) →
+      // compteurs + 1.
+      await bumpRevisions(session.id)
+      return { kind: 'student', student, isNew: !match.recoveryCode }
+    }
+      // v2.6.0 : premier compte pour ce nom — le mot de passe choisi par
       // l'étudiant est OBLIGATOIRE (4 à 12 caractères, chiffres et lettres).
       // Un compte existant ne passe jamais ici (branche « matches »).
       if (!/^[A-Z0-9]{4,12}$/.test(recoveryCode)) {
-        return NextResponse.json(
-          {
-            error:
-              'Le code personnel doit contenir entre 4 et 12 caractères (chiffres et lettres, sans accents ni symboles).',
-          },
-          { status: 400 }
-        )
+        return {
+          kind: 'error',
+          error:
+            'Le mot de passe doit contenir entre 4 et 12 caractères (chiffres et lettres, sans accents ni symboles).',
+          status: 400 as const,
+        }
       }
       // Vérifie que l'équipe demandée appartient bien à la séance
       let targetTeamId = teamId
@@ -127,7 +173,8 @@ export async function POST(req: NextRequest) {
         if (!team) targetTeamId = null
       }
       if (!targetTeamId) {
-        // Affectation automatique : l'équipe la moins remplie
+        // Affectation automatique : l'équipe la moins remplie (recalculée
+        // SOUS le verrou → équilibrée même sous rafale de 150 joins).
         const teams = await db.team.findMany({
           where: { sessionId: session.id },
           orderBy: { number: 'asc' },
@@ -151,7 +198,7 @@ export async function POST(req: NextRequest) {
           targetTeamId = best.id
         }
       }
-      student = await db.student.create({
+      const student = await db.student.create({
         data: {
           sessionId: session.id,
           name,
@@ -161,21 +208,40 @@ export async function POST(req: NextRequest) {
           teamId: targetTeamId,
         },
       })
-      isNew = true
+      // v2.9.0 : nouvel étudiant → compteurs + 1.
+      await bumpRevisions(session.id)
+      await recordSessionEvent(
+        session.id,
+        'join',
+        student.id,
+        { teamId: student.teamId },
+        origin
+      )
+      return { kind: 'student', student, isNew: true }
+      }
+    )
+
+    if (result.kind === 'error') {
+      return NextResponse.json({ error: result.error }, { status: result.status })
     }
 
     return NextResponse.json({
-      token: student.token,
-      studentId: student.id,
-      name: student.name,
-      teamId: student.teamId,
+      token: result.student.token,
+      studentId: result.student.id,
+      name: result.student.name,
+      teamId: result.student.teamId,
       code: session.code,
       title: session.title,
-      recoveryCode: student.recoveryCode,
-      isNew,
+      recoveryCode: result.student.recoveryCode,
+      isNew: result.isNew,
     })
   } catch (e) {
     console.error('POST /api/join', e)
     return NextResponse.json({ error: 'Erreur serveur inattendue.' }, { status: 500 })
   }
 }
+
+export const POST = withMetrics<unknown>(
+  'join',
+  doPOST
+)

@@ -94,16 +94,47 @@ export function initLangFromStorage(): Lang {
   return current
 }
 
+// ---------- Personnalisations de texte (v2.9.0, espace administrateur) ----------
+
+// L'administrateur peut remplacer n'importe quel libellé de
+// l'application (la clé du dictionnaire EST le texte français
+// d'origine). Une personnalisation prime sur TOUTES les langues :
+// c'est le texte voulu par l'administrateur, affiché tel quel.
+// Structure : { "texte d\u2019origine": "texte voulu", … }
+let textOverrides: Record<string, string> = {}
+
+/** Applique (ou retire, si null) les personnalisations de texte.
+ *  Provoque un re-rendu de tous les composants traduits. */
+export function setTextOverrides(overrides: Record<string, string> | null): void {
+  const clean: Record<string, string> = {}
+  if (overrides && typeof overrides === 'object') {
+    for (const [k, v] of Object.entries(overrides)) {
+      if (typeof k === 'string' && typeof v === 'string' && v.length > 0) clean[k] = v
+    }
+  }
+  textOverrides = clean
+  listeners.forEach((fn) => fn())
+}
+
+/** Copie des personnalisations actuelles (interface administrateur). */
+export function getTextOverrides(): Record<string, string> {
+  return { ...textOverrides }
+}
+
 // ---------- Traduction ----------
 
 /** Traduit `key` (texte français) dans la langue courante.
  *  Variables : t("Question {i} sur {n}", { i, n }). */
 export function t(key: string, vars?: Record<string, string | number>): string {
-  let s = key
-  const dict = DICTS[current]
-  if (dict) {
-    const v = dict[key]
-    if (typeof v === 'string' && v.length > 0) s = v
+  // v2.9.0 : personnalisation administrateur prioritaire.
+  const custom = textOverrides[key]
+  let s = typeof custom === 'string' && custom.length > 0 ? custom : key
+  if (s === key) {
+    const dict = DICTS[current]
+    if (dict) {
+      const v = dict[key]
+      if (typeof v === 'string' && v.length > 0) s = v
+    }
   }
   if (vars) {
     for (const [k, val] of Object.entries(vars)) {

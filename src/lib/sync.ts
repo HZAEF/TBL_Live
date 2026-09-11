@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import type { Session } from '@prisma/client'
 import { PHASE_ORDER } from './tbl-types'
 import { randomToken } from './tbl'
+import { APP_VERSION } from './version'
 
 // ============================================================
 // TBL Live v2.7.0 — Synchronisation Internet ↔ réseau local
@@ -61,6 +62,20 @@ export interface BackupSessionCore {
    *  téléchargeable, toujours présents dans le format v2 de sync). */
   phaseStartedAt?: string | null
   feedbackReady?: boolean
+  /** v2.9.0 : compteurs du sondage allégé (absents des sauvegardes
+   *  antérieures → traités comme 0). */
+  revision?: number
+  revisionTeacher?: number
+  /** v3.0.0 : signalements anti-capture activés pour cette séance
+   *  (absent des sauvegardes antérieures → non modifié à l'import,
+   *  la valeur par défaut « désactivé » s'applique aux séances neuves). */
+  reportsEnabled?: boolean
+  /** v3.2.0 : email institutionnel du propriétaire (absent des
+   *  sauvegardes antérieures → null). Les ids de comptes DIFFÈRENT
+   *  entre l'instance locale et l'instance en ligne ; l'email est
+   *  l'identifiant stable — le miroir distant résout cet email en
+   * compte LOCAL pour que « Mes séances » fonctionne des deux côtés. */
+  ownerEmail?: string | null
 }
 
 export interface SyncBackup {
@@ -79,6 +94,10 @@ export interface SyncBackup {
   saiItems: unknown[]
   saiResponses: unknown[]
   alerts?: unknown[]
+  /** v3.2.0 : partage de la séance — [{ email, addedAt }]. La liste
+   *  des enseignants invités suit la séance d'une instance à l'autre
+   *  (et dans les sauvegardes .json) : l'invitation survit au miroir. */
+  collaborators?: unknown[]
   /** v2 uniquement — jamais exposé au navigateur. */
   secrets?: {
     sessionId: string
@@ -101,9 +120,40 @@ const MAX = {
   saiItems: 120,
   saiResponses: 30000,
   alerts: 8000,
+  collaborators: 40,
 }
 
 class BackupError extends Error {}
+
+// ------------------------------------------------------------
+// v3.4.0 — RÉSILIENCE AU DÉCALAGE DE VERSION (diagnostic v3.4) :
+// un pack de mise à jour appliqué SANS son schéma (ex. v3.3.0,
+// livré « sans manipulation de base » — qui supposait la v3.2.0
+// déjà appliquée) laisse l'instance distante avec un code NOUVEAU
+// et une base ANCIENNE : db.sessionCollaborator échoue alors sur
+// CHAQUE export_sync → « La version en ligne a répondu par une
+// erreur (500) » → l'enseignante ne peut plus synchroniser.
+// Toutes les lectures du PARTAGE (v3.2) sont donc tolérantes : en
+// cas d'échec (table absente OU modèle absent du client Prisma
+// généré), elles rendent une liste VIDE et la synchronisation
+// CONTINUE (le partage se répare dès que le schéma est appliqué).
+// ------------------------------------------------------------
+
+/** Le partage (table SessionCollaborator) est-il disponible sur
+ * CETTE instance ? Sondé une fois, mémoïsé pour le processus. */
+let collaboratorsAvailable: boolean | null = null
+async function hasCollaborators(): Promise<boolean> {
+  if (collaboratorsAvailable !== null) return collaboratorsAvailable
+  try {
+    await db.sessionCollaborator.findFirst({ select: { id: true } })
+    collaboratorsAvailable = true
+  } catch {
+    // table absente (schéma v3.1) OU modèle absent du client Prisma
+    // (déploiement de code v3.2+ sans régénérer) : partage indisponible
+    collaboratorsAvailable = false
+  }
+  return collaboratorsAvailable
+}
 
 function arr(b: unknown, max: number): unknown[] {
   if (b === undefined || b === null) return []
@@ -146,7 +196,13 @@ function dateOrNull(v: unknown): Date | null {
 /** Sauvegarde complète AVEC secrets (format v2, serveur ↔ serveur). */
 export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
   const sid = session.id
-  const [teams, students, questions, cases, answers, appeals, appAnswers, peerEvals, saiItems, saiResponses, alerts] =
+  // v3.4.0 — lectures TOLÉRANTES : le partage (v3.2) et le compte
+  // propriétaire peuvent être indisponibles sur une instance dont la
+  // base n'est pas à jour (pack de mise à jour sans schéma) — la
+  // sauvegarde part alors SANS ces sections (elles reviennent dès
+  // que le schéma est appliqué) au lieu de faire échouer TOUTE la
+  // synchronisation.
+  const [teams, students, questions, cases, answers, appeals, appAnswers, peerEvals, saiItems, saiResponses, alerts, collaborators, owner] =
     await Promise.all([
       db.team.findMany({ where: { sessionId: sid }, orderBy: { number: 'asc' } }),
       db.student.findMany({ where: { sessionId: sid }, orderBy: { createdAt: 'asc' } }),
@@ -165,6 +221,19 @@ export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
       }),
       db.saiResponse.findMany({ where: { student: { sessionId: sid } }, orderBy: { createdAt: 'asc' } }),
       db.alertEvent.findMany({ where: { student: { sessionId: sid } }, orderBy: { createdAt: 'asc' } }),
+      // v3.2.0 : partage — invitations par email (identifiant stable
+      // inter-instances) + propriétaire (résolu en email).
+      // v3.4.0 : tolérant au schéma non appliqué (liste vide).
+      hasCollaborators().then((ok) =>
+        ok
+          ? db.sessionCollaborator.findMany({ where: { sessionId: sid }, orderBy: { addedAt: 'asc' } })
+          : Promise.resolve([])
+      ),
+      session.teacherId
+        ? db.teacherAccount
+            .findUnique({ where: { id: session.teacherId }, select: { email: true } })
+            .catch(() => null)
+        : Promise.resolve(null),
     ])
   return {
     format: 'tbl-live-sync',
@@ -181,6 +250,20 @@ export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
       // v2.7.0 : horodatages de la fusion (statut en avant uniquement).
       phaseStartedAt: session.phaseStartedAt.toISOString(),
       feedbackReady: session.feedbackReady,
+      // v2.9.0 : compteurs du sondage allégé — transportés pour que le
+      // miroir distant garde des numéros qui AUGMENTENT toujours (les
+      // étudiants de l'autre version détectent chaque changement).
+      revision: session.revision,
+      revisionTeacher: session.revisionTeacher,
+      // v3.0.0 : signalements anti-capture activés pour cette séance
+      // (l'administrateur peut les réactiver TBL par TBL — le réglage
+      // suit la séance sur les deux versions).
+      reportsEnabled: session.reportsEnabled,
+      // v3.2.0 : email du propriétaire — l'identifiant stable entre
+      // instances. Le miroir distant le résout en compte LOCAL à
+      // l'arrivée : « Mes séances » du propriétaire fonctionne ainsi
+      // sur la version en ligne ET sur la version locale.
+      ownerEmail: owner?.email ?? null,
     },
     secrets: {
       sessionId: session.id,
@@ -295,6 +378,14 @@ export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
       phase: a.phase,
       createdAt: a.createdAt.toISOString(),
     })),
+    // v3.2.0 : invitations de partage (emails institutionnels) — la
+    // liste suit la séance partout : miroir en ligne, sauvegarde .json,
+    // restauration. Aucun secret : les emails ne suffisent pas à
+    // ouvrir la séance (le compte + mot de passe restent exigés).
+    collaborators: collaborators.map((c) => ({
+      email: c.email,
+      addedAt: c.addedAt.toISOString(),
+    })),
   }
 }
 
@@ -309,10 +400,14 @@ export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
  *
  * @param pin nouveau PIN (format v1, séance recréée sur un appareil
  *            neuf — déjà haché par l'appelant) ; absent en v2.
+ * @param teacherId v3.0.0 : compte enseignant propriétaire (télé-
+ *            versement depuis le navigateur) ; null pour la synchro
+ *            machine ↔ machine (le miroir n'appartient à personne).
  */
 export async function replaceSessionFromBackup(
   backupRaw: unknown,
-  hashedPin?: string
+  hashedPin?: string,
+  teacherId?: string | null
 ): Promise<{ session: Session; restored: boolean }> {
   const b = backupRaw as Partial<SyncBackup>
   if (!b || typeof b !== 'object') throw new BackupError('Fichier invalide.')
@@ -336,6 +431,25 @@ export async function replaceSessionFromBackup(
     : 'lobby'
   const iratMinutes = int(b.session.iratMinutes ?? 10, 1, 90, 'durée iRAT')
   const createdAt = date(b.session.createdAt)
+  // v2.9.0 — CORRECTIF MINUTEUR : la date de début de PHASE doit venir de
+  // la sauvegarde, pas de la date de CRÉATION de la séance. Avant ce
+  // correctif, le miroir en ligne recevait phaseStartedAt = createdAt :
+  // les étudiants connectés à la version en ligne voyaient un temps
+  // écoulé énorme pendant l'iRAT (« Temps écoulé (+42:17) » qui montait
+  // sans fin) alors que les étudiants du serveur local voyaient le vrai
+  // compte à rebours. La vraie date est transportée ; à défaut, la date
+  // de création reste le repli historique (statut lobby).
+  const phaseStartedAt = dateOrNull(b.session?.phaseStartedAt) ?? createdAt
+  // v2.9.0 : compteurs du sondage allégé, transportés (+1 à l'arrivée
+  // pour forcer UN renouvellement complet chez les clients distants).
+  const incomingRevision = Math.max(
+    0,
+    Math.min(2_000_000_000, int(b.session?.revision ?? 0, 0, 2_000_000_000, 'révision'))
+  )
+  const incomingRevisionTeacher = Math.max(
+    0,
+    Math.min(2_000_000_000, int(b.session?.revisionTeacher ?? 0, 0, 2_000_000_000, 'révision'))
+  )
 
   // --- Validation complète AVANT toute écriture ---
   const teams = arr(b.teams, MAX.teams).map((t) => {
@@ -494,6 +608,24 @@ export async function replaceSessionFromBackup(
       createdAt: date(o.createdAt),
     }
   })
+  // v3.2.0 — Partage : invitations par email. Tolérant par construction
+  // (un email invalide dans une sauvegarde ancienne est ignoré, jamais
+  // un échec d'import), dédupliqué (la contrainte unique exigerait de
+  // toute façon l'unicité).
+  const seenCollab = new Set<string>()
+  const collaborators = arr(b.collaborators, MAX.collaborators)
+    .map((c) => {
+      const o = c as Record<string, unknown>
+      const email = typeof o.email === 'string' ? o.email.trim().toLowerCase() : ''
+      if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email) || email.length > 120) return null
+      return { email, addedAt: date(o.addedAt) }
+    })
+    .filter((c): c is { email: string; addedAt: Date } => {
+      if (c === null) return false
+      if (seenCollab.has(c.email)) return false
+      seenCollab.add(c.email)
+      return true
+    })
 
   // Cohérence des références (une sauvegarde produite par l'application
   // est toujours cohérente ; un fichier altéré, lui, est refusé ici).
@@ -522,6 +654,46 @@ export async function replaceSessionFromBackup(
   const finalToken = isV2 ? (teacherToken as string) : existing ? existing.teacherToken : randomToken()
   const finalPin = isV2 ? (teacherPin as string) : (hashedPin as string)
 
+  // v3.2.0 — RÉSOLUTION DU PROPRIÉTAIRE : les ids de comptes DIFFÈRENT
+  // d'une instance à l'autre (locale / en ligne), l'email est l'identi-
+  // fiant stable transporté par la sauvegarde.
+  //  - teacherId explicite (téléversement navigateur) → il prime ;
+  //  - sinon (sync machine ↔ machine) : ownerEmail du fichier résolu
+  //    contre les comptes de CETTE instance → le miroir appartient au
+  //    même enseignant (même email) → « Mes séances » fonctionne des
+  //    deux côtés ; aucun compte correspondant → miroir sans proprié-
+  //    taire (comportement antérieur : réclamation par PIN possible).
+  //  v3.4.0 — tolérant : un échec de lecture (base en retard d'un
+  //  pack de mise à jour) laisse le miroir sans propriétaire plutôt
+  //  que de faire échouer l'import complet.
+  let finalTeacherId: string | null = null
+  if (typeof teacherId === 'string' && teacherId.length > 0) {
+    finalTeacherId = teacherId
+  } else {
+    const ownerEmail =
+      typeof b.session?.ownerEmail === 'string' ? b.session.ownerEmail.trim().toLowerCase() : ''
+    if (ownerEmail) {
+      try {
+        const owner = await db.teacherAccount.findUnique({
+          where: { email: ownerEmail },
+          select: { id: true },
+        })
+        finalTeacherId = owner?.id ?? null
+      } catch {
+        finalTeacherId = null
+      }
+    }
+  }
+
+  // v3.4.0 — PARTAGE : la table SessionCollaborator est sondée AVANT
+  // la transaction (en PostgreSQL, une instruction en échec à
+  // l'intérieur d'une transaction ABORTE toute la transaction : on
+  // ne peut pas se contenter d'un try/catch autour du createMany).
+  // Une instance dont la base n'a pas le partage (schéma v3.1 ou
+  // moins) importe la séance SANS les invitations — tout le reste
+  // est identique, la synchronisation n'échoue plus.
+  const canWriteCollaborators = await hasCollaborators()
+
   return db.$transaction(async (tx) => {
     if (existing) {
       // Le remplacement efface tout (cascade) puis recrée avec les MÊMES
@@ -537,13 +709,25 @@ export async function replaceSessionFromBackup(
         teacherToken: finalToken,
         status,
         iratMinutes,
-        phaseStartedAt: createdAt,
+        // v2.9.0 : vraie date de début de phase (correctif minuteur).
+        phaseStartedAt,
         revealed: false,
         feedbackReady: false,
         deletedAt: dateOrNull(b.session?.deletedAt),
         dataPurgedAt: dateOrNull(b.session?.dataPurgedAt),
         createdAt,
         pinAttempts: 0,
+        // v2.9.0 : compteurs reçus + 1 → numéros strictement croissants
+        // pour les clients de CETTE version (renouvellement immédiat).
+        revision: incomingRevision + 1,
+        revisionTeacher: incomingRevisionTeacher + 1,
+        // v3.0.0 : compte propriétaire (téléversement navigateur) et
+        // signalements (transportés par la synchronisation, l'adminis-
+        // trateur peut les activer TBL par TBL sur l'une ou l'autre
+        // version). Absent du fichier → désactivés (défaut v3.0).
+        // v3.2.0 : résolution par EMAIL (voir plus haut).
+        teacherId: finalTeacherId,
+        reportsEnabled: b.session?.reportsEnabled === true,
       },
     })
     if (teams.length > 0)
@@ -687,6 +871,19 @@ export async function replaceSessionFromBackup(
           createdAt: a.createdAt,
         })),
       })
+    // v3.2.0 — invitations de partage : recréées à l'identique (email,
+    // date d'ajout) — le miroir/la restauration porte le même partage.
+    // v3.4.0 : ignorées si la table est indisponible (schéma non
+    // appliqué) — l'import réussit, le partage reviendra au prochain
+    // cycle après application du schéma.
+    if (collaborators.length > 0 && canWriteCollaborators)
+      await tx.sessionCollaborator.createMany({
+        data: collaborators.map((c) => ({
+          sessionId,
+          email: c.email,
+          addedAt: c.addedAt,
+        })),
+      })
     return { session: sessionRow, restored: !!existing }
   })
 }
@@ -706,6 +903,10 @@ export interface MergeSummary {
   alertsInserted: number
   casesOpened: number
   teamsInserted: number
+  // v3.2.0 : invitations de partage distantes ajoutées localement
+  // (union par email — un retrait de partage ne se propage QUE par le
+  // push miroir qui suit, jamais par le pull).
+  collaboratorsInserted: number
   sessionUpdated: boolean
 }
 
@@ -737,6 +938,7 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
     alertsInserted: 0,
     casesOpened: 0,
     teamsInserted: 0,
+    collaboratorsInserted: 0,
     sessionUpdated: false,
   }
   const sid = session.id
@@ -1009,6 +1211,35 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
     }
   }
 
+  // ---- Partage (v3.2.0) : union par email, INSERT-ONLY ----
+  // Une invitation distante qui n'existe pas localement est ajoutée
+  // (le collègue invité sur l'autre instance voit la séance ici aussi).
+  // Un RETRAIT de partage ne se propage PAS par le pull (la fusion ne
+  // supprime jamais) : il se propage par le push miroir qui suit le
+  // pull — comportement identique aux autres données.
+  // v3.4.0 : section TOLÉRANTE (table absente → zéro insertion, la
+  // fusion du reste de la séance continue).
+  if (await hasCollaborators()) {
+    for (const raw of arr(b.collaborators, MAX.collaborators)) {
+      const o = raw as Record<string, unknown>
+      const email = typeof o.email === 'string' ? o.email.trim().toLowerCase() : ''
+      if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email) || email.length > 120) continue
+      try {
+        const existing = await db.sessionCollaborator.findUnique({
+          where: { sessionId_email: { sessionId: sid, email } },
+          select: { id: true },
+        })
+        if (existing) continue
+        await db.sessionCollaborator.create({
+          data: { sessionId: sid, email, addedAt: dateOrNull(o.addedAt) ?? new Date() },
+        })
+        summary.collaboratorsInserted += 1
+      } catch {
+        // concurrence résiduelle OU table indisponible : ignorée
+      }
+    }
+  }
+
   // ---- Cas cliniques (v2.8.2) : UN seul cas ouvert à la fois ----
   // L'enseignant est seul pilote : l'état d'ouverture vit sur
   // l'ordinateur maître. La fusion adopte l'état d'ouverture DISTANT
@@ -1070,6 +1301,18 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
   // Titre / durée : dernier écrit gagne (enseignant, des deux côtés).
   const remoteUpdated = dateOrNull(b.exportedAt)
   const localSessionEff = eff(session.updatedAt, session.createdAt)
+  // v3.0.0 — Signalements par TBL : dernier écrit gagne (comme le titre
+  // et la durée). Uniquement si le fichier DISTANT transporte explicitement
+  // le réglage (les versions antérieures à la v3.0 ne le transportent pas :
+  // leur fusion ne doit jamais désactiver ce qu'on a activé ici).
+  if (
+    typeof s?.reportsEnabled === 'boolean' &&
+    s.reportsEnabled !== session.reportsEnabled &&
+    remoteUpdated &&
+    remoteUpdated.getTime() > localSessionEff
+  ) {
+    data.reportsEnabled = s.reportsEnabled
+  }
   if (remoteUpdated && remoteUpdated.getTime() > localSessionEff) {
     if (typeof s?.title === 'string' && s.title.length >= 1 && s.title.length <= 120 && s.title !== session.title)
       data.title = s.title
@@ -1079,6 +1322,30 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
   if (Object.keys(data).length > 0) {
     await db.session.update({ where: { id: sid }, data })
     summary.sessionUpdated = true
+  }
+  // v2.9.0 : la fusion a écrit (ou non) dans la base locale — les
+  // compteurs du sondage allégé suivent. Une contribution distante
+  // doit être vue par le tableau de bord local ET par les étudiants
+  // locaux (réponses d'équipes connectées à l'autre version).
+  const wroteSomething =
+    summary.teamsInserted > 0 ||
+    summary.studentsInserted > 0 ||
+    summary.studentsUpdated > 0 ||
+    summary.answersInserted > 0 ||
+    summary.answersUpdated > 0 ||
+    summary.appealsInserted > 0 ||
+    summary.appealsUpdated > 0 ||
+    summary.appAnswersUpserted > 0 ||
+    summary.peerEvalsUpserted > 0 ||
+    summary.saiResponsesUpserted > 0 ||
+    summary.alertsInserted > 0 ||
+    summary.casesOpened > 0 ||
+    summary.sessionUpdated
+  if (wroteSomething) {
+    await db.session.update({
+      where: { id: sid },
+      data: { revision: { increment: 1 }, revisionTeacher: { increment: 1 } },
+    })
   }
   return summary
 }
@@ -1106,10 +1373,23 @@ export interface SyncResult {
   ok: true
   pulled: MergeSummary | null
   pushed: true
+  /** v2.9.0 : true si l'état local n'avait pas changé depuis le
+   *  précédent push — le miroir a été laissé tel quel (aucun envoi
+   *  inutile, la charge de la version en ligne reste minuscule). */
+  skipped?: boolean
+  /** v3.0.0 : true si la version en ligne n'avait RIEN changé depuis
+   *  le précédent tirage — la réponse « rien n'a changé » minuscule a
+   *  remplacé le snapshot complet (tirage delta). */
+  pullSkipped?: boolean
   at: string
 }
 
 export class SyncError extends Error {
+  /** v3.4.0 — le diagnostic suggère une VERSION EN LIGNE en retard
+   * (base incomplète après une mise à jour partielle du dépôt
+   * GitHub) : l'interface peut afficher la consigne de réparation
+   * (appliquer le pack de mise à jour AVEC le schéma). */
+  versionSkew = false
   constructor(message: string) {
     super(message)
   }
@@ -1117,12 +1397,64 @@ export class SyncError extends Error {
 
 const FETCH_TIMEOUT_MS = 60_000
 
+/** v3.4.0 — SONDE DE VERSION : interroge GET /api/config de
+ * l'instance distante (quelques octets, aucune base). Renvoie la
+ * version déclarée, ou null si l'instance ne répond pas / ne dit
+ * rien. Un écart versions EST la cause la plus fréquente d'une
+ * « synchronisation impossible » : un pack de mise à jour appliqué
+ * sans son schéma laisse la base en ligne incomplète. */
+async function probeRemoteVersion(base: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${base}/api/config`, {
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    })
+    if (!res.ok) return null
+    const data = (await res.json().catch(() => null)) as { version?: unknown } | null
+    return typeof data?.version === 'string' ? data.version : null
+  } catch {
+    return null
+  }
+}
+
+/** Compare deux versions « X.Y.Z » : true si remote < local. */
+function isOlderVersion(remote: string, local: string): boolean {
+  const parse = (v: string) => v.split('.').map((n) => Number(n) || 0)
+  const [r, l] = [parse(remote), parse(local)]
+  for (let i = 0; i < 3; i++) {
+    const a = r[i] ?? 0
+    const b = l[i] ?? 0
+    if (a !== b) return a < b
+  }
+  return false
+}
+
+// v2.9.0 — Mémoire du dernier push réussi (par code de séance) : le
+// miroir distant n'est réenvoyé QUE si l'état local a changé depuis
+// (nouvelle réponse, phase tournée, question modifiée…) ou si le
+// tirage a fusionné des contributions distantes. Entre deux actions,
+// le cycle se limite au tirage (une requête légère) : la version en
+// ligne ne reçoit plus un miroir complet toutes les 5 secondes pour
+// rien — sa charge et celle de sa base restent minuscules, même avec
+// une synchronisation très fréquente.
+const lastPushState = new Map<string, { rev: number; revT: number }>()
+
+// v3.0.0 — Mémoire du dernier TIRAGE réussi (par code de séance) : le
+// cycle envoie au serveur distant les numéros qu'il connaît déjà ; si
+// rien n'a changé de l'autre côté, la réponse est une ligne minuscule
+// « rien n'a changé » (aucune construction de sauvegarde, aucun merge,
+// quelques octets au lieu du snapshot complet). C'est le mode hybride
+// DELTA : le snapshot complet ne circule que lorsqu'une donnée a
+// réellement changé (réponse, phase, équipe…).
+const lastPullState = new Map<string, { rev: number; revT: number }>()
+
 /**
  * Synchronisation complète d'une séance avec la version en ligne :
  *  1. TIRER l'état distant (échec propre si la séance n'existe pas
  *     encore en ligne : on la créera par le push) ;
  *  2. FUSIONNER les contributions distantes dans la base locale ;
- *  3. POUSSER l'état local complet (miroir exact, mêmes identifiants).
+ *  3. POUSSER l'état local complet (miroir exact, mêmes identifiants)
+ *     — uniquement s'il a changé depuis le précédent push.
  * Aucune donnée n'est jamais perdue localement : une panne de réseau
  * interrompt la synchronisation, jamais la séance.
  */
@@ -1131,27 +1463,86 @@ export async function syncNow(session: Session, remoteUrl: string): Promise<Sync
   if (!base) throw new SyncError('Adresse de la version en ligne invalide.')
   const url = (p: string) => `${base}${p}`
 
-  // 1. Tirer
+  // 1. Tirer — v3.0.0 TIRAGE DELTA : on transmet les numéros de révision
+  // déjà connus ; si la version en ligne porte ENCORE ces numéros, elle
+  // répond « rien n'a changé » (quelques octets, aucune construction de
+  // sauvegarde) : le merge est intégralement sauté. Au moindre changement
+  // distant (réponse d'un étudiant en ligne, phase tournée là-bas…), le
+  // snapshot complet arrive et la fusion s'exécute comme avant.
   let pulled: MergeSummary | null = null
+  let pullSkipped = false
+  const lastPull = lastPullState.get(session.code)
   try {
     const res = await fetch(url(`/api/sessions/${session.code}/manage`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: session.teacherToken, action: 'export_sync' }),
+      body: JSON.stringify({
+        token: session.teacherToken,
+        action: 'export_sync',
+        ...(lastPull ? { rev: lastPull.rev, revT: lastPull.revT } : {}),
+      }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     })
     if (res.status === 404) {
       // La séance n'existe pas encore en ligne : elle sera créée par le push.
       pulled = null
     } else if (res.ok) {
-      const backup = (await res.json()) as SyncBackup
-      pulled = await mergePullIntoLocal(session, backup)
+      const data = (await res.json()) as
+        | { unchanged?: boolean; revision?: number; revisionTeacher?: number }
+        | SyncBackup
+      if (
+        data &&
+        (data as { unchanged?: boolean }).unchanged === true &&
+        typeof (data as { revision?: number }).revision === 'number'
+      ) {
+        // Rien n'a changé en ligne : numéros confirmés, aucun merge.
+        pullSkipped = true
+        lastPullState.set(session.code, {
+          rev: (data as { revision: number }).revision,
+          revT: (data as { revisionTeacher: number }).revisionTeacher,
+        })
+      } else {
+        const backup = data as SyncBackup
+        pulled = await mergePullIntoLocal(session, backup)
+        const after = await db.session.findUnique({
+          where: { id: session.id },
+          select: { revision: true, revisionTeacher: true },
+        })
+        if (after) {
+          lastPullState.set(session.code, { rev: after.revision, revT: after.revisionTeacher })
+        }
+      }
     } else if (res.status === 401) {
       throw new SyncError(
         'La séance en ligne existe mais ne correspond pas à cette séance (jetons différents). Utilisez plutôt « Téléverser la séance » pour la recréer.'
       )
     } else {
-      throw new SyncError(`La version en ligne a répondu par une erreur (${res.status}).`)
+      // v3.4.0 — LE message d'erreur distant est récupéré quand il
+      // existe (sinon on reste sur le code HTTP seul), PUIS une sonde
+      // de version explique les échecs 5xx les plus courants : une
+      // version en ligne en retard (pack appliqué sans schéma).
+      let detail = ''
+      try {
+        const body = (await res.clone().json().catch(() => null)) as { error?: string } | null
+        if (body && typeof body.error === 'string' && body.error.length > 0) {
+          detail = ` (${body.error.slice(0, 200)})`
+        }
+      } catch {
+        // corps illisible : détail vide
+      }
+      const err = new SyncError(
+        `La version en ligne a répondu par une erreur (${res.status}).${detail}`
+      )
+      if (res.status >= 500) {
+        const remoteVersion = await probeRemoteVersion(base)
+        if (remoteVersion && isOlderVersion(remoteVersion, APP_VERSION)) {
+          err.versionSkew = true
+          err.message =
+            `La version en ligne (${remoteVersion}) est en retard sur votre version locale (${APP_VERSION}) : sa base de données est probablement incomplète. ` +
+            'Appliquez le pack de mise à jour complet (schéma inclus) sur votre dépôt GitHub — glissez-y le dossier du pack « tbl-live-mise-a-jour-v340.zip », faites le commit, puis laissez Vercel redéployer (2-3 minutes). Aucune donnée n’est perdue.'
+        }
+      }
+      throw err
     }
   } catch (e) {
     if (e instanceof SyncError) throw e
@@ -1160,7 +1551,35 @@ export async function syncNow(session: Session, remoteUrl: string): Promise<Sync
     )
   }
 
+  // v2.9.0 — État local (re)lu APRÈS la fusion : les compteurs de
+  // révision résument tout ce qui a changé localement.
+  const fresh = await db.session.findUnique({
+    where: { id: session.id },
+    select: { revision: true, revisionTeacher: true },
+  })
+  if (!fresh) throw new SyncError('La séance locale a disparu (suppression définitive ?).')
+  const last = lastPushState.get(session.code)
+  const localChanged = !last || last.rev !== fresh.revision || last.revT !== fresh.revisionTeacher
+  const pulledSomething =
+    !!pulled &&
+    (pulled.answersInserted + pulled.answersUpdated + pulled.appealsInserted +
+      pulled.appealsUpdated + pulled.appAnswersUpserted + pulled.peerEvalsUpserted +
+      pulled.saiResponsesUpserted + pulled.studentsInserted + pulled.studentsUpdated +
+      pulled.alertsInserted + pulled.casesOpened + pulled.teamsInserted) > 0
+
   // 2+3. Pousser l'état local complet (fusionné) — miroir exact.
+  // Rien n'a bougé nulle part depuis le précédent push : on s'abstient
+  // (le tirage suffit, le miroir distant est déjà exact).
+  if (!localChanged && !pulledSomething && last) {
+    return {
+      ok: true,
+      pulled,
+      pushed: true,
+      skipped: true,
+      pullSkipped,
+      at: new Date().toISOString(),
+    }
+  }
   const backup = await buildSyncBackup(session)
   try {
     const res = await fetch(url('/api/sessions/import'), {
@@ -1171,7 +1590,35 @@ export async function syncNow(session: Session, remoteUrl: string): Promise<Sync
     })
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { error?: string } | null
-      throw new SyncError(body?.error ?? `La synchronisation a été refusée par la version en ligne (${res.status}).`)
+      const err = new SyncError(
+        body?.error ?? `La synchronisation a été refusée par la version en ligne (${res.status}).`
+      )
+      // v3.4.0 — même diagnostic que le tirage : une 5xx distante +
+      // version en retard = base en ligne incomplète (pack appliqué
+      // sans schéma) → consigne de réparation explicite.
+      if (res.status >= 500) {
+        const remoteVersion = await probeRemoteVersion(base)
+        if (remoteVersion && isOlderVersion(remoteVersion, APP_VERSION)) {
+          err.versionSkew = true
+          err.message =
+            `La version en ligne (${remoteVersion}) est en retard sur votre version locale (${APP_VERSION}) : sa base de données est probablement incomplète. ` +
+            'Appliquez le pack de mise à jour complet (schéma inclus) sur votre dépôt GitHub — glissez-y le dossier du pack « tbl-live-mise-a-jour-v340.zip », faites le commit, puis laissez Vercel redéployer (2-3 minutes). Aucune donnée n’est perdue.'
+        }
+      }
+      throw err
+    }
+    // v3.0.0 — le miroir renvoie ses nouveaux compteurs : on les
+    // mémorise comme « déjà tirés » → le prochain cycle ne re-tirera
+    // PAS le snapshot qu'on vient de pousser (tirage delta).
+    const imported = (await res.json().catch(() => null)) as {
+      revision?: number
+      revisionTeacher?: number
+    } | null
+    if (imported && typeof imported.revision === 'number') {
+      lastPullState.set(session.code, {
+        rev: imported.revision,
+        revT: typeof imported.revisionTeacher === 'number' ? imported.revisionTeacher : 0,
+      })
     }
   } catch (e) {
     if (e instanceof SyncError) throw e
@@ -1179,6 +1626,7 @@ export async function syncNow(session: Session, remoteUrl: string): Promise<Sync
       'L’envoi vers la version en ligne a échoué. La séance locale est intacte — réessayez plus tard (ou à la fin de la séance).'
     )
   }
+  lastPushState.set(session.code, { rev: fresh.revision, revT: fresh.revisionTeacher })
 
   const now = new Date()
   await db.session.update({ where: { id: session.id }, data: { syncedAt: now } })

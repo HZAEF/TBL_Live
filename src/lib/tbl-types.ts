@@ -54,6 +54,10 @@ export interface PublicSessionDTO {
 }
 
 export interface DashboardDTO {
+  /** v2.9.0 — compteur enseignant du sondage allégé + heure serveur
+   *  (minuteur iRAT identique à celui des étudiants). */
+  revision?: number
+  serverNow?: string
   session: {
     id: string
     code: string
@@ -72,9 +76,18 @@ export interface DashboardDTO {
     /** Corbeille : date de mise à la corbeille (null = séance active).
      * Restaurable pendant 48 h, suppression définitive au-delà. */
     deletedAt: string | null
+    /** v3.0.0 : signalements anti-capture activés pour cette séance
+     *  (désactivés par défaut : l'onglet « Signalements » du tableau de
+     *  bord n'apparaît que si l'administrateur les a réactivés). */
+    reportsEnabled?: boolean
     /** Date de purge automatique des données étudiantes (rétention 4 mois,
      * null = données encore présentes). QCM et cas cliniques conservés. */
     dataPurgedAt: string | null
+    /** v3.2.0 : enseignants invités à co-piloter cette séance (partage
+     * par email institutionnel — visible dans l'onglet Configurations). */
+    collaborators?: { email: string; addedAt: string; hasAccount: boolean; name: string | null }[]
+    /** v3.2.0 : compte propriétaire (null = séance sans propriétaire). */
+    owner?: { email: string; name: string } | null
   }
   questions: QuestionDTO[]
   cases: CaseDTO[]
@@ -132,6 +145,9 @@ export interface DashboardDTO {
    *  (capture d'écran suspectée sur PC, sortie de l'application pendant un
    *  test). Des SUSPICIONS à interpréter, jamais des preuves. */
   alerts?: SessionAlertDTO[]
+  /** v3.3.0 : journal des modifications enseignantes (150 dernières
+   *  entrées, la plus récente d'abord) — rubrique « Journal ». */
+  journal?: JournalEntryDTO[]
 }
 
 export interface SessionAlertDTO {
@@ -148,7 +164,32 @@ export interface SessionAlertDTO {
   createdAt: string
 }
 
+/** v3.3.0 — entrée du JOURNAL DES MODIFICATIONS ENSEIGNANTES (rubrique
+ * « Journal » du tableau de bord) : qui a changé quoi, quand, depuis
+ * quelle instance (local / en ligne). Le payload est structuré selon
+ * le type (voir write-queue.ts) — jamais de secret dedans. */
+export interface JournalEntryDTO {
+  /** Numéro d'événement dans la séance (ordre croissant). */
+  sequence: number
+  type: string
+  /** Payload parsé : { action?, detail?, actor?, actorEmail?, from?,
+   *  to?, status?, erasedAnswers?… } selon le type. */
+  payload: Record<string, unknown>
+  /** 'local' (PC de l'enseignant) ou 'online' (version en ligne). */
+  origin: string
+  createdAt: string
+}
+
 export interface StudentStateDTO {
+  /** v2.9.0 — numéro de révision (sondage allégé : la réponse
+   *  « unchanged » est filtrée avant d'arriver ici). */
+  revision?: number
+  /** v3.0.0 — numéro de révision de l'ÉQUIPE de l'étudiant (tentatives
+   *  tRAT : seuls les membres de l'équipe renouvellent leur état). */
+  teamRevision?: number | null
+  /** v2.9.0 — heure du serveur au moment de la réponse (minuteurs
+   *  synchronisés enseignant ↔ étudiants, horloges personnelles corrigées). */
+  serverNow?: string
   session: {
     code: string
     title: string
@@ -159,6 +200,9 @@ export interface StudentStateDTO {
     /** v2.7.0 : false = écran d'attente (aucun résultat n'est envoyé
      *  par le serveur tant que l'enseignant n'a pas lancé le feedback). */
     feedbackReady?: boolean
+    /** v3.0.0 : signalements anti-capture activés pour cette séance
+     *  (désactivés par défaut — l'app étudiante ne les envoie plus). */
+    reportsEnabled?: boolean
   }
   me: {
     id: string
@@ -206,6 +250,12 @@ export interface StudentStateDTO {
   /** v2.6.0 — Questionnaire TBL-SAI (phase finished, AVANT soumission) :
    *  les items de la séance dans l'ordre. */
   saiItems?: SaiItemDTO[]
+  /** v3.4.0 — Liste des équipes de la séance, envoyée UNIQUEMENT en
+   *  phase lobby (avant le début du iRAT) : l'étudiant peut corriger
+   *  son nom et son numéro d'équipe depuis l'écran d'attente. Après
+   *  le début de la séance, la modification est interdite (serveur) —
+   *  la liste n'est plus transmise. */
+  teams?: { id: string; name: string }[]
   /** v2.6.0 — Note finale sur 20 calculée par le serveur, transmise
    *  UNIQUEMENT après la soumission du questionnaire TBL-SAI (les
    *  réponses correctes ne sont plus envoyées en fin de séance : la

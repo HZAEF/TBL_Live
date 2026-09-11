@@ -1,8 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
+  Dices,
   Download,
   KeyRound,
   Loader2,
@@ -10,7 +13,9 @@ import {
   RefreshCw,
   Save,
   ShieldAlert,
+  Share2,
   Trash2,
+  UserPlus,
   Users,
   Wand2,
   Wifi,
@@ -49,6 +54,7 @@ import {
   type FlaggedQuestion,
 } from '@/lib/docimology'
 import { api } from '@/lib/tbl-client'
+import { loadAppConfig } from '@/lib/app-config'
 import { buildXlsx, downloadBlob } from '@/lib/xlsx-writer'
 import { choiceLetter } from './shared'
 import { QuestionEditor, emptyQuestion } from './question-editor'
@@ -282,12 +288,21 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
 
       {/* --- Questions iRAT / tRAT --- */}
       <section className="space-y-3">
-        <h3 className="flex items-center gap-2 text-sm font-bold text-stone-800">
-          <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-xs font-bold text-white">
-            iRAT / tRAT
-          </span>
-          {t('{n} question(s) de préparation', { n: ratQs.length })}
-        </h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-bold text-stone-800">
+            <span className="rounded-full bg-amber-500 px-2.5 py-0.5 text-xs font-bold text-white">
+              iRAT / tRAT
+            </span>
+            {t('{n} question(s) de préparation', { n: ratQs.length })}
+          </h3>
+          {/* v2.9.0 — « Aléatoire » : mélange questions + réponses. */}
+          <ShuffleButton
+            manage={manage}
+            scope="rat"
+            count={ratQs.length}
+            label={t('Mélanger au hasard les questions et les réponses')}
+          />
+        </div>
         {ratQs.length === 0 && (
           <p className="rounded-2xl border border-dashed border-amber-300 bg-amber-50/50 p-4 text-center text-sm text-stone-500">
             {t(
@@ -296,7 +311,17 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
           </p>
         )}
         {ratQs.map((q, i) => (
-          <ExistingQuestionEditor key={q.id} index={i} question={q} manage={manage} />
+          <ExistingQuestionEditor
+            key={q.id}
+            index={i}
+            question={q}
+            manage={manage}
+            onMove={
+              ratQs.length > 1
+                ? (direction) => manage('move_question', { id: q.id, direction })
+                : undefined
+            }
+          />
         ))}
       </section>
 
@@ -356,7 +381,18 @@ export function QuestionsTab({ data, manage }: { data: DashboardDTO; manage: Man
               )}
             </p>
             {freeAppQs.map((q, i) => (
-              <ExistingQuestionEditor key={q.id} index={i} question={q} manage={manage} prefix="Exercice" />
+              <ExistingQuestionEditor
+                key={q.id}
+                index={i}
+                question={q}
+                manage={manage}
+                prefix="Exercice"
+                onMove={
+                  freeAppQs.length > 1
+                    ? (direction) => manage('move_question', { id: q.id, direction })
+                    : undefined
+                }
+              />
             ))}
           </div>
         )}
@@ -485,8 +521,23 @@ function CaseEditor({
           question={q}
           manage={manage}
           prefix="QCU"
+          onMove={
+            questions.length > 1
+              ? (direction) => manage('move_question', { id: q.id, direction })
+              : undefined
+          }
         />
       ))}
+
+      {/* v2.9.0 — Mélanger les QCU du cas (et leurs réponses). */}
+      {questions.length >= 2 && (
+        <ShuffleButton
+          manage={manage}
+          scope={kase.id}
+          count={questions.length}
+          label={t('Mélanger au hasard les QCU de ce cas et leurs réponses')}
+        />
+      )}
 
       {newQ ? (
         <div className="space-y-2 rounded-xl border border-lime-300 bg-white p-2">
@@ -535,12 +586,16 @@ function ExistingQuestionEditor({
   manage,
   prefix,
   hidePhaseToggle = false,
+  onMove,
 }: {
   index: number
   question: DashboardDTO['questions'][number]
   manage: ManageFn
   prefix?: string
   hidePhaseToggle?: boolean
+  /** v2.9.0 — déplacer la question dans sa liste (flèches ↑ / ↓).
+   *  Absent = liste non réordonnable. */
+  onMove?: (direction: -1 | 1) => void
 }) {
   const [draft, setDraft] = useState<DraftQuestion>({
     text: question.text,
@@ -555,34 +610,108 @@ function ExistingQuestionEditor({
     draft.correct !== question.correct ||
     draft.phase !== question.phase
   return (
-    <div className="space-y-2">
-      <QuestionEditor
-        index={index}
-        value={draft}
-        onChange={setDraft}
-        hidePhaseToggle={hidePhaseToggle || question.caseId !== null}
-        prefix={prefix ?? (question.phase === 'application' ? 'Exercice' : 'Question')}
-        onDelete={() => {
-          if (
-            window.confirm(
-              t('Supprimer cette question ? Ses réponses seront aussi supprimées.')
-            )
-          ) {
-            manage('delete_question', { id: question.id })
-          }
-        }}
-      />
-      {dirty && (
-        <Button
-          size="sm"
-          className="h-9 w-full bg-emerald-600 hover:bg-emerald-700"
-          onClick={() => manage('update_question', { id: question.id, question: draft })}
-        >
-          <Save className="mr-1.5 h-4 w-4" />
-          {t('Enregistrer les modifications')}
-        </Button>
+    <div className="flex items-start gap-1.5">
+      {/* v2.9.0 — Réordonnancement : monter / descendre la question
+          dans SA liste (iRAT/tRAT, QCU du cas, exercices libres). */}
+      {onMove && (
+        <div className="flex flex-col gap-1 pt-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 border-stone-300 text-stone-500 hover:bg-stone-50"
+            onClick={() => onMove(-1)}
+            disabled={index === 0}
+            aria-label={t('Monter la question')}
+            title={t('Monter la question')}
+          >
+            <ArrowUp className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-8 w-8 border-stone-300 text-stone-500 hover:bg-stone-50"
+            onClick={() => onMove(1)}
+            disabled={false}
+            aria-label={t('Descendre la question')}
+            title={t('Descendre la question')}
+          >
+            <ArrowDown className="h-4 w-4" />
+          </Button>
+        </div>
       )}
+      <div className="min-w-0 flex-1 space-y-2">
+        <QuestionEditor
+          index={index}
+          value={draft}
+          onChange={setDraft}
+          hidePhaseToggle={hidePhaseToggle || question.caseId !== null}
+          prefix={prefix ?? (question.phase === 'application' ? 'Exercice' : 'Question')}
+          onDelete={() => {
+            if (
+              window.confirm(
+                t('Supprimer cette question ? Ses réponses seront aussi supprimées.')
+              )
+            ) {
+              manage('delete_question', { id: question.id })
+            }
+          }}
+        />
+        {dirty && (
+          <Button
+            size="sm"
+            className="h-9 w-full bg-emerald-600 hover:bg-emerald-700"
+            onClick={() => manage('update_question', { id: question.id, question: draft })}
+          >
+            <Save className="mr-1.5 h-4 w-4" />
+            {t('Enregistrer les modifications')}
+          </Button>
+        )}
+      </div>
     </div>
+  )
+}
+
+// v2.9.0 — Bouton « Aléatoire » : mélange au hasard les questions du
+// groupe ET les réponses de chaque question. Les réponses déjà
+// enregistrées suivent leur texte (remappage serveur) : les résultats
+// restent exacts même si le mélange a lieu pendant la séance.
+function ShuffleButton({
+  manage,
+  scope,
+  count,
+  label,
+}: {
+  manage: ManageFn
+  scope: string
+  count: number
+  label: string
+}) {
+  const { t } = useI18n()
+  if (count < 2) return null
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-8 border-stone-300 text-stone-600 hover:bg-stone-50"
+      onClick={() => {
+        if (
+          window.confirm(
+            t(
+              'Mélanger au hasard les {n} questions et leurs réponses ? L’ordre actuel sera remplacé (les résultats déjà enregistrés suivent leur texte, rien n’est perdu).',
+              { n: count }
+            )
+          )
+        ) {
+          manage('shuffle_quiz', { scope })
+        }
+      }}
+      title={label}
+    >
+      <Dices className="mr-1 h-3.5 w-3.5" />
+      {t('Aléatoire')}
+    </Button>
   )
 }
 
@@ -1568,6 +1697,190 @@ export function writeSyncConfig(code: string, cfg: SyncConfig | null) {
   }
 }
 
+// ---------------- v3.2.0 : partage de la séance ----------------
+
+/**
+ * Carte « Partage de la séance » (onglet Configurations) : inviter des
+ * collègues par leur email institutionnel — la séance apparaît dans
+ * « Mes séances » de leur compte, ouverture sans PIN, co-pilotage du
+ * même tableau de bord. La liste suit la séance (sync locale ↔ en
+ * ligne, sauvegarde .json) : l'email est l'identifiant stable.
+ */
+function ShareCard({
+  data,
+  token,
+  refresh,
+}: {
+  data: DashboardDTO
+  token: string
+  refresh: () => Promise<unknown>
+}) {
+  const { t } = useI18n()
+  const { toast } = useToast()
+  const [email, setEmail] = useState('')
+  const [busy, setBusy] = useState(false)
+  const collaborators = data.session.collaborators ?? []
+  const code = data.session.code
+
+  const invite = async () => {
+    if (busy || !email.trim()) return
+    setBusy(true)
+    try {
+      const res = await api<{
+        ok: boolean
+        duplicate?: boolean
+        email: string
+        hasAccount: boolean
+        name: string | null
+      }>(`/api/sessions/${code}/manage`, {
+        method: 'POST',
+        body: JSON.stringify({ token, action: 'share_session', email: email.trim() }),
+      })
+      if (res.duplicate) {
+        toast({ title: t('Déjà invité'), description: t('Cet enseignant a déjà accès à la séance.') })
+      } else if (!res.hasAccount) {
+        toast({
+          title: t('Invitation enregistrée'),
+          description: t(
+            'Aucun compte enseignant n’existe encore avec cet email : prévenez votre administrateur pour qu’il le crée — la séance apparaîtra alors dans ses « Mes séances ».'
+          ),
+        })
+      } else {
+        toast({
+          title: t('Invitation envoyée'),
+          description: t('{name} retrouve la séance dans « Mes séances » de son compte.', {
+            name: res.name ?? res.email,
+          }),
+        })
+      }
+      setEmail('')
+      await refresh()
+    } catch (e) {
+      toast({
+        title: t('Invitation impossible'),
+        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
+        variant: 'destructive',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const revoke = async (target: string) => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await api(`/api/sessions/${code}/manage`, {
+        method: 'POST',
+        body: JSON.stringify({ token, action: 'unshare_session', email: target }),
+      })
+      toast({
+        title: t('Partage retiré'),
+        description: t('{email} ne verra plus la séance dans « Mes séances ».', { email: target }),
+      })
+      await refresh()
+    } catch (e) {
+      toast({
+        title: t('Retrait impossible'),
+        description: e instanceof Error ? e.message : t('Erreur inconnue.'),
+        variant: 'destructive',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4">
+      <div>
+        <p className="flex items-center gap-1.5 text-sm font-bold text-stone-900">
+          <Share2 className="h-4 w-4 text-emerald-600" />
+          {t('Partage de la séance')}
+        </p>
+        <p className="mt-0.5 text-xs leading-relaxed text-stone-500">
+          {t(
+            'Invitez d’autres enseignants par leur email institutionnel : la séance s’ajoute dans leurs « Mes séances », ouverture sans PIN, même tableau de bord — idéal pour animer la séance à plusieurs.'
+          )}
+        </p>
+      </div>
+
+      {data.session.owner && (
+        <p className="rounded-xl bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          {t('Propriétaire :')} <b>{data.session.owner.name}</b>
+          <span className="text-stone-400"> ({data.session.owner.email})</span>
+        </p>
+      )}
+
+      {collaborators.length > 0 && (
+        <ul className="space-y-1.5">
+          {collaborators.map((c) => (
+            <li
+              key={c.email}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-stone-200 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-stone-800">
+                  {c.name ?? c.email}
+                  {c.name && <span className="ml-2 text-xs text-stone-400">{c.email}</span>}
+                </p>
+                <p className="text-[11px]">
+                  {c.hasAccount ? (
+                    <span className="text-emerald-600">{t('Compte actif')}</span>
+                  ) : (
+                    <span className="text-amber-600">
+                      {t('Compte inexistant — prévenez l’administrateur')}
+                    </span>
+                  )}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-8 text-stone-400 hover:bg-red-50 hover:text-red-600"
+                disabled={busy}
+                onClick={() => void revoke(c.email)}
+              >
+                <X className="mr-0.5 h-3.5 w-3.5" />
+                {t('Retirer')}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+        <div>
+          <Label htmlFor="share-email">{t('Email institutionnel')}</Label>
+          <Input
+            id="share-email"
+            type="email"
+            inputMode="email"
+            autoComplete="off"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="prenom.nom@etablissement"
+            className="mt-1.5 h-11"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void invite()
+              }
+            }}
+          />
+        </div>
+        <Button
+          className="h-11 bg-emerald-600 hover:bg-emerald-700"
+          disabled={busy || email.trim().length < 5}
+          onClick={() => void invite()}
+        >
+          {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <UserPlus className="mr-1 h-4 w-4" />}
+          {t('Inviter')}
+        </Button>
+      </div>
+    </section>
+  )
+}
+
 export function ConfigurationsTab({
   data,
   manage,
@@ -1592,6 +1905,12 @@ export function ConfigurationsTab({
   const [autoSync, setAutoSync] = useState(() => readSyncConfig(data.session.code)?.auto ?? false)
   const [syncing, setSyncing] = useState(false)
   const [excludeId, setExcludeId] = useState<string | null>(null)
+  // v2.9.0 : délai du cycle de synchronisation — réglable dans
+  // l'espace administrateur (/admin), affiché ici en secondes.
+  const [syncSeconds, setSyncSeconds] = useState(5)
+  useEffect(() => {
+    loadAppConfig().then((c) => setSyncSeconds(Math.round(c.syncIntervalMs / 1000)))
+  }, [])
 
   const saveSync = (url: string, auto: boolean) => {
     setSyncUrl(url)
@@ -1638,6 +1957,12 @@ export function ConfigurationsTab({
 
   return (
     <div className="space-y-5">
+      {/* v3.0.0 — pouls de la séance EN DIRECT : étudiants actifs
+          (vu dans la dernière minute) et requêtes/minute. Une requête
+          minuscule toutes les 10 s : l'enseignante repère immédiatement
+          un problème pendant le cours (serveur local = chiffres exacts). */}
+      <LiveStatsCard />
+
       {/* ---- Paramètres de la séance ---- */}
       <section className="space-y-4 rounded-2xl border border-stone-200 bg-white p-4">
         <div>
@@ -1764,6 +2089,9 @@ export function ConfigurationsTab({
         </div>
       </section>
 
+      {/* ---- v3.2.0 : partage de la séance avec d'autres enseignants ---- */}
+      <ShareCard data={data} token={token} refresh={refresh} />
+
       {/* ---- Exclure un étudiant ---- */}
       <section className="space-y-3 rounded-2xl border border-stone-200 bg-white p-4">
         <div>
@@ -1867,8 +2195,14 @@ export function ConfigurationsTab({
             disabled={!syncUrl.trim()}
             className="h-4 w-4 accent-emerald-600"
           />
-          {t('Synchroniser automatiquement (toutes les 5 secondes et à chacune de vos actions, pendant que ce tableau de bord est ouvert)')}
+          {t(
+            'Synchroniser automatiquement (toutes les {s} secondes et à chacune de vos actions, pendant que ce tableau de bord est ouvert)',
+            { s: syncSeconds }
+          )}
         </label>
+        <p className="-mt-1 pl-6 text-xs text-stone-500">
+          {t('Ce délai se règle dans l’espace administrateur de l’application.')}
+        </p>
         <Button
           className="h-11 w-full bg-sky-600 hover:bg-sky-700"
           disabled={!syncUrl.trim() || syncing}
@@ -2506,4 +2840,58 @@ export function exportXlsx(
     },
   ])
   downloadBlob(blob, `resultats-tbl-${data.session.code}.xlsx`)
+}
+
+// v3.0.0 — Pouls de la séance en direct (étudiants actifs, charge).
+function LiveStatsCard() {
+  const { t } = useI18n()
+  const [stats, setStats] = useState<{ activeStudents: number; requestsPerMinute: number } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/config?live=1', { cache: 'no-store' })
+        if (res.ok && alive) {
+          const d = (await res.json()) as { live?: { activeStudents?: number; requestsPerMinute?: number } }
+          if (d.live) {
+            setStats({
+              activeStudents: d.live.activeStudents ?? 0,
+              requestsPerMinute: d.live.requestsPerMinute ?? 0,
+            })
+          }
+        }
+      } catch {
+        // indicateur silencieux : jamais bloquant
+      }
+    }
+    void tick()
+    const id = setInterval(tick, 10_000)
+    return () => {
+      alive = false
+      clearInterval(id)
+    }
+  }, [])
+
+  return (
+    <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+      <div className="flex items-center gap-3">
+        <span className="relative flex h-3 w-3">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+          <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+        </span>
+        <p className="text-sm font-bold text-emerald-900">{t('Pouls de la séance (en direct)')}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm text-emerald-900">
+        <span>
+          <strong className="text-lg">{stats?.activeStudents ?? '…'}</strong>{' '}
+          {t('étudiant(s) actif(s)')}
+        </span>
+        <span>
+          <strong className="text-lg">{stats?.requestsPerMinute ?? '…'}</strong>{' '}
+          {t('requêtes / minute')}
+        </span>
+      </div>
+    </section>
+  )
 }

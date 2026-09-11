@@ -75,12 +75,18 @@ function JoinForm({
   const [code, setCode] = useState('')
   const [name, setName] = useState('')
   const [recoveryCode, setRecoveryCode] = useState('')
-  const [teamId, setTeamId] = useState<string>('auto')
+  // v3.4.0 — DEMANDE DE L'ENSEIGNANTE : le choix d'équipe démarre VIDE
+  // (plus de « placement automatique » présélectionné). Beaucoup
+  // d'étudiants cliquaient trop vite sans remarquer qu'un choix
+  // (automatique OU numéro d'équipe) est attendu : le bouton reste
+  // désactivé et un message clair s'affiche tant qu'aucun choix
+  // explicite n'est fait.
+  const [teamId, setTeamId] = useState<string>('')
   const [sessionInfo, setSessionInfo] = useState<PublicSessionDTO | null>(null)
   const [codeError, setCodeError] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  // Écran « notez votre code de reprise » après une première connexion
+  // Écran « notez votre mot de passe » après une première connexion
   const [welcome, setWelcome] = useState<{ token: string; recoveryCode: string } | null>(null)
 
   // Dès que le code est complet, on cherche la séance
@@ -97,6 +103,9 @@ function JoinForm({
         if (alive) {
           setSessionInfo(info)
           setCodeError('')
+          // Séance sans équipes (impossible en pratique, 2 minimum) :
+          // placement automatique par repli.
+          if (info.teams.length === 0) setTeamId('auto')
         }
       } catch (e) {
         if (alive) {
@@ -121,12 +130,24 @@ function JoinForm({
       setError(t('Saisissez votre nom (au moins 2 caractères).'))
       return
     }
-    // v2.6.0 : le code personnel (choisi par l'étudiant) est obligatoire —
-    // 4 caractères minimum, chiffres et lettres.
+    // v2.6.0 : le mot de passe (choisi par l'étudiant) est obligatoire —
+    // 4 caractères minimum, chiffres et lettres. v3.4.0 : « code
+    // personnel » devient « mot de passe » (confusion signalée avec le
+    // code de la SÉANCE à 6 caractères).
     if (recoveryCode.trim().length < 4) {
       setError(
         t(
-          'Votre code personnel doit contenir au moins 4 caractères (chiffres ou lettres, sans accents ni symboles).'
+          'Votre mot de passe doit contenir au moins 4 caractères (chiffres ou lettres, sans accents ni symboles).'
+        )
+      )
+      return
+    }
+    // v3.4.0 — un choix d'équipe EXPLICITE est obligatoire : vide = refus
+    // (le message oriente vers l'un OU l'autre, jamais vers un clic aveugle).
+    if (sessionInfo && sessionInfo.teams.length > 0 && teamId === '') {
+      setError(
+        t(
+          'Choisissez votre équipe : placement automatique ou numéro d’équipe — un choix est nécessaire avant de continuer.'
         )
       )
       return
@@ -146,8 +167,8 @@ function JoinForm({
         body: JSON.stringify({
           code,
           name: name.trim(),
-          teamId: teamId === 'auto' ? null : teamId,
-          // v2.6.0 : code personnel choisi par l'étudiant (obligatoire)
+          teamId: teamId === 'auto' || teamId === '' ? null : teamId,
+          // v2.6.0 : mot de passe choisi par l'étudiant (obligatoire)
           recoveryCode: recoveryCode.trim(),
         }),
       })
@@ -175,7 +196,7 @@ function JoinForm({
     }
   }
 
-  // Écran intermédiaire : confirmation du code personnel enregistré
+  // Écran intermédiaire : confirmation du mot de passe enregistré
   // (l'étudiant l'a choisi lui-même — on le lui remontre une fois pour
   // qu'il le note, car sans lui il ne pourra pas reprendre sa séance).
   if (welcome) {
@@ -186,7 +207,7 @@ function JoinForm({
             <KeyRound className="h-6 w-6" />
           </div>
           <h2 className="mt-3 text-xl font-bold text-stone-900">{t('Bienvenue !')}</h2>
-          <p className="mt-1 text-sm text-stone-600">{t('Votre code personnel est bien enregistré :')}</p>
+          <p className="mt-1 text-sm text-stone-600">{t('Votre mot de passe est bien enregistré :')}</p>
           <p className="mt-4 select-all rounded-xl bg-stone-900 px-4 py-3 font-mono text-2xl font-bold tracking-[0.35em] text-emerald-300">
             {welcome.recoveryCode}
           </p>
@@ -197,14 +218,14 @@ function JoinForm({
           </p>
           <p className="mt-2 text-xs text-stone-500">
             {t(
-              'Vous pourrez aussi le revoir dans la séance (bouton « code » en haut de l’écran) ou le demander à votre professeur.'
+              'Vous pourrez aussi le revoir dans la séance (bouton « mot de passe » en haut de l’écran) ou le demander à votre professeur.'
             )}
           </p>
           <Button
             onClick={() => onJoined(welcome.token)}
             className="mt-5 h-12 w-full bg-emerald-600 text-base hover:bg-emerald-700"
           >
-            {t('J’ai noté mon code — entrer dans la séance')}
+            {t('J’ai noté mon mot de passe — entrer dans la séance')}
           </Button>
         </div>
         <Button variant="ghost" onClick={onExit} className="w-full text-stone-500">
@@ -268,7 +289,10 @@ function JoinForm({
             </div>
 
             <div>
-              <Label htmlFor="s-recovery">{t('Code personnel *')}</Label>
+              {/* v3.4.0 — « code personnel » devient « mot de passe » : le
+                  mot « code » prêtait à confusion avec le CODE DE LA SÉANCE
+                  à 6 caractères saisi juste au-dessus. */}
+              <Label htmlFor="s-recovery">{t('Mot de passe *')}</Label>
               <Input
                 id="s-recovery"
                 value={recoveryCode}
@@ -282,7 +306,7 @@ function JoinForm({
               />
               <p className="mt-1 text-xs text-stone-500">
                 {t(
-                  'Choisissez un code de 4 caractères ou plus (chiffres et/ou lettres) : il vous permettra de retrouver votre séance. Déjà inscrit ? Entrez celui choisi lors de votre première connexion.'
+                  'Choisissez un mot de passe de 4 caractères ou plus (chiffres et/ou lettres) : il vous permettra de retrouver votre séance. Déjà inscrit ? Entrez celui choisi lors de votre première connexion.'
                 )}
               </p>
             </div>
@@ -292,7 +316,13 @@ function JoinForm({
                 <Label>{t('Votre équipe')}</Label>
                 <Select value={teamId} onValueChange={setTeamId}>
                   <SelectTrigger className="mt-1.5 h-12 text-base">
-                    <SelectValue />
+                    {/* v3.4.0 — PAS de présélection : la case démarre VIDE
+                        (placeholder visible). Le choix automatique et les
+                        numéros d'équipe sont EN DESSOUS, l'étudiant doit
+                        choisir EXPLICITEMENT — beaucoup cliquaient trop
+                        vite sans faire attention (demande de
+                        l'enseignante). */}
+                    <SelectValue placeholder={t('— À choisir : automatique ou votre équipe —')} />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">
@@ -305,6 +335,11 @@ function JoinForm({
                     ))}
                   </SelectContent>
                 </Select>
+                {teamId === '' && (
+                  <p className="mt-1 text-xs font-semibold text-amber-700">
+                    {t('Un choix est requis : placement automatique ou numéro d’équipe.')}
+                  </p>
+                )}
               </div>
             )}
           </>
@@ -327,7 +362,7 @@ function JoinForm({
 
         <p className="text-center text-xs text-stone-500">
           {t(
-            'Si vous changez de téléphone en cours de séance : même code de séance, même nom, et votre code personnel — vous retrouvez alors toutes vos réponses.'
+            'Si vous changez de téléphone en cours de séance : même code de séance, même nom, et votre mot de passe — vous retrouvez alors toutes vos réponses.'
           )}
         </p>
       </div>

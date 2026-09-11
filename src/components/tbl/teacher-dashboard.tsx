@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Copy,
   Check,
@@ -36,6 +36,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { api, refreshTeacherSessionMeta, removeTeacherSession, usePoll } from '@/lib/tbl-client'
+import { noteServerNow } from '@/lib/server-clock'
+import { loadAppConfig } from '@/lib/app-config'
 import {
   PHASE_INFO,
   PHASE_ORDER,
@@ -43,6 +45,7 @@ import {
   computeRevealedAppQuestionIds,
   suggestPin,
   type DashboardDTO,
+  type JournalEntryDTO,
   type Phase,
 } from '@/lib/tbl-types'
 import { useToast } from '@/hooks/use-toast'
@@ -101,13 +104,31 @@ export function TeacherDashboard({
   onAuthError: () => void
   onOpenSession: (code: string, token: string, title: string) => void
 }) {
+  // v2.9.0 — Sondage allégé : ?rev=N → réponse minuscule si rien n'a
+  // changé (l'ancien objet est renvoyé → aucun re-rendu). Au moindre
+  // changement (réponse, signalement, phase…), l'état complet arrive.
+  const lastStateRef = useRef<DashboardDTO | null>(null)
   const { data, error, loading, refresh } = usePoll<DashboardDTO>(
     // v2.4.0 : jeton dans l'en-tête Authorization (plus jamais dans l'URL
     // des appels API → n'apparaît pas dans les journaux serveur).
-    () =>
-      api<DashboardDTO>(`/api/sessions/${code}/dashboard`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }),
+    async () => {
+      const rev = lastStateRef.current?.revision
+      const url = rev === undefined ? `/api/sessions/${code}/dashboard` : `/api/sessions/${code}/dashboard?rev=${rev}`
+      const d = await api<DashboardDTO | { unchanged: true; revision: number; serverNow?: string }>(
+        url,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      )
+      // v2.9.0 : heure serveur → minuteur iRAT synchronisé avec celui des
+      // étudiants, même si l'horloge de cet ordinateur est décalée.
+      noteServerNow(d.serverNow)
+      if ((d as { unchanged?: boolean }).unchanged === true) {
+        return lastStateRef.current as DashboardDTO
+      }
+      lastStateRef.current = d as DashboardDTO
+      return d as DashboardDTO
+    },
     2500
   )
   const { toast } = useToast()
@@ -117,6 +138,10 @@ export function TeacherDashboard({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [confirmForever, setConfirmForever] = useState(false)
   const [confirmDuplicate, setConfirmDuplicate] = useState(false)
+  // v3.3.0 — redémarrage de la séance (fenêtre d'avertissement puis
+  // effacement des réponses / retour de tous les étudiants à l'accueil).
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const [dupPin, setDupPin] = useState('')
   const [duplicating, setDuplicating] = useState(false)
   // v2.4.0 : sauvegarde complète (JSON) — copie hors-ligne de toutes les
@@ -234,21 +259,25 @@ export function TeacherDashboard({
   // v2.7.0 — Synchronisation automatique Internet ↔ réseau local.
   // v2.8.2 : QUASI IMMÉDIATE — toutes les 5 secondes (au lieu de 30)
   // + immédiatement après chaque action de l'enseignant (voir manage
-  // ci-dessous). Les contributions tirées apparaissent d'elles-mêmes :
-  // le tableau de bord se rafraîchit tout seul (2,5 s). Silencieuse :
-  // une coupure réseau n'affiche rien, la séance continue et la date
-  // de dernière synchronisation (onglet Configurations) reflète l'état
-  // réel. NB : déclaré AVANT les retours anticipés (règle des hooks
-  // React).
+  // ci-dessous). v2.9.0 : le délai du cycle est réglable dans
+  // l'ESPACE ADMINISTRATEUR (/admin) — 2 s (très réactif) à 60 s
+  // (économe) ; le push n'envoie le miroir que si quelque chose a
+  // réellement changé (voir sync.ts). Silencieuse : une coupure réseau
+  // n'affiche rien, la séance continue. NB : déclaré AVANT les retours
+  // anticipés (règle des hooks React).
+  const [syncIntervalMs, setSyncIntervalMs] = useState(5000)
+  useEffect(() => {
+    loadAppConfig().then((c) => setSyncIntervalMs(c.syncIntervalMs))
+  }, [])
   useEffect(() => {
     if (!data?.session.code || data.session.deletedAt) return
     const sessionCode = data.session.code
     const id = setInterval(() => {
       if (document.hidden) return
       backgroundSync(sessionCode, token)
-    }, 5_000)
+    }, syncIntervalMs)
     return () => clearInterval(id)
-  }, [data?.session.code, data?.session.deletedAt, token])
+  }, [data?.session.code, data?.session.deletedAt, token, syncIntervalMs])
 
   if (loading && !data) {
     return (
@@ -342,6 +371,24 @@ export function TeacherDashboard({
               <CopyPlus className="mr-1 h-4 w-4" />
               {t('Dupliquer')}
             </Button>
+            {/* v3.3.0 — REDÉMARRAGE DE LA SÉANCE : efface toutes les
+                réponses enregistrées, ramène tous les étudiants à
+                l'écran d'accueil (ils attendent le lancement du iRAT).
+                Fenêtre d'avertissement obligatoire — action devenue
+                courante pour rejouer une séance avec une autre classe. */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-stone-300"
+              onClick={() => setConfirmRestart(true)}
+              disabled={!!data.session.deletedAt || restarting}
+              title={t(
+                'Effacer toutes les réponses enregistrées et ramener les étudiants à l’accueil'
+              )}
+            >
+              <RotateCcw className="mr-1 h-4 w-4" />
+              {t('Redémarrer')}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -409,23 +456,27 @@ export function TeacherDashboard({
               <strong>{data.students.length}</strong> {t('étudiant(s) ·')}{' '}
               <strong>{data.teams.length}</strong> {t('équipe(s)')}
             </p>
+            {/* v2.9.0 — DOUBLE minuteur, comme demandé : (1) chronomètre
+                ASCENDANT de la phase en cours, toujours visible (durée
+                depuis le lancement) ; (2) pendant l'iRAT UNIQUEMENT, le
+                compte à rebours DESCENDANT synchronisé avec celui des
+                étudiants — il atteint 00:00 puis affiche « Temps écoulé »
+                (plus jamais un compteur qui remonte). */}
             <p className="flex items-center gap-2 text-stone-700">
               <Timer className="h-4 w-4 text-emerald-600" />
-              {status === 'irat' ? (
-                <>
-                  {t('Temps restant :')}{' '}
-                  <Countdown
-                    startedAt={data.session.phaseStartedAt}
-                    minutes={data.session.iratMinutes}
-                  />
-                </>
-              ) : (
-                <>
-                  {t('Phase en cours depuis :')}{' '}
-                  <ElapsedSince startedAt={data.session.phaseStartedAt} />
-                </>
-              )}
+              {t('Phase en cours depuis :')}{' '}
+              <ElapsedSince startedAt={data.session.phaseStartedAt} />
             </p>
+            {status === 'irat' && (
+              <p className="flex items-center gap-2 text-stone-700">
+                <Timer className="h-4 w-4 text-amber-600" />
+                {t('Temps restant (iRAT) :')}{' '}
+                <Countdown
+                  startedAt={data.session.phaseStartedAt}
+                  minutes={data.session.iratMinutes}
+                />
+              </p>
+            )}
             <p className="pl-6 text-xs text-stone-500">
               {t('Séance créée le {date} · rétention des données étudiantes : 4 mois', {
                 date: formatDate(new Date(data.session.createdAt)),
@@ -486,22 +537,35 @@ export function TeacherDashboard({
               </span>
             )}
           </TabsTrigger>
-          {/* v2.5.1 : rubrique « Signalements » demandée par l'enseignant,
-              à part entière juste après « Réclamations » (alertes anti-capture
-              divisées par épreuve, voir teacher-tabs.tsx). */}
-          <TabsTrigger value="alerts" className="flex-1 px-3 py-2 sm:flex-none">
-            {t('Signalements')}
-            {(data.alerts?.length ?? 0) > 0 && (
-              <span className="ml-1.5 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                {data.alerts!.length}
-              </span>
-            )}
-          </TabsTrigger>
+          {/* v2.5.1 : rubrique « Signalements » (alertes anti-capture
+              divisées par épreuve, voir teacher-tabs.tsx).
+              v3.0.0 : DÉSACTIVÉE par défaut — l'onglet n'apparaît que si
+              l'administrateur a activé les signalements pour CE TBL
+              (espace /admin → Gestion des séances). Quand ils sont
+              désactivés, la requête des événements n'est même plus
+              exécutée côté serveur : la séance reste légère. */}
+          {data.session.reportsEnabled === true && (
+            <TabsTrigger value="alerts" className="flex-1 px-3 py-2 sm:flex-none">
+              {t('Signalements')}
+              {(data.alerts?.length ?? 0) > 0 && (
+                <span className="ml-1.5 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                  {data.alerts!.length}
+                </span>
+              )}
+            </TabsTrigger>
+          )}
           {/* v2.7.0 : rubrique « Configurations » — paramètres de la séance
               (titre, PIN, durée), sauvegarde/téléversement, exclusion d'un
               étudiant et synchronisation Internet ↔ réseau local. */}
           <TabsTrigger value="config" className="flex-1 px-3 py-2 sm:flex-none">
             {t('Configurations')}
+          </TabsTrigger>
+          {/* v3.3.0 : rubrique « Journal » — modifications des enseignants
+              (propriétaire et invités) : qui a changé quoi, quand, depuis
+              quelle instance. Colonne vertébrale de la collaboration
+              entre co-enseignants d'une séance partagée. */}
+          <TabsTrigger value="journal" className="flex-1 px-3 py-2 sm:flex-none">
+            {t('Journal')}
           </TabsTrigger>
         </TabsList>
 
@@ -531,14 +595,21 @@ export function TeacherDashboard({
         <TabsContent value="appeals" className="mt-4">
           <AppealsTab data={data} manage={manage} />
         </TabsContent>
-        <TabsContent value="alerts" className="mt-4">
-          <SignalementsTab data={data} />
-        </TabsContent>
+        {data.session.reportsEnabled === true && (
+          <TabsContent value="alerts" className="mt-4">
+            <SignalementsTab data={data} />
+          </TabsContent>
+        )}
         {/* v2.7.0 : Configurations — tout ce qui n'est ni questions, ni
             questionnaire, ni équipes : paramètres, sauvegarde, transfert,
             exclusion d'étudiant, synchronisation. */}
         <TabsContent value="config" className="mt-4">
           <ConfigurationsTab data={data} manage={manage} token={token} refresh={refresh} />
+        </TabsContent>
+        {/* v3.3.0 : Journal — modifications des enseignants (lecture pure,
+            rafraîchi par le sondage du tableau de bord). */}
+        <TabsContent value="journal" className="mt-4">
+          <JournalTab data={data} />
         </TabsContent>
       </Tabs>
 
@@ -595,7 +666,12 @@ export function TeacherDashboard({
               className="bg-emerald-600 hover:bg-emerald-700"
               onClick={async () => {
                 if (pendingPhase) {
-                  await manage('set_phase', { phase: pendingPhase })
+                  // v3.1.0 — expectedPhase : la commande embarque la phase
+                  // QUE LE TABLEAU DE BORD CONNAÎT : si la séance a avancé
+                  // entre-temps (autre appareil, requête lente en file),
+                  // le serveur REFUSE la commande périmée au lieu de
+                  // l'appliquer — l'affichage se resynchronise tout seul.
+                  await manage('set_phase', { phase: pendingPhase, expectedPhase: status })
                   // v2.7.0 : fin de séance → synchronisation FINALE avec la
                   // version en ligne (si une adresse est configurée) : tous
                   // les résultats partent sur Internet, sans action
@@ -623,6 +699,66 @@ export function TeacherDashboard({
               }}
             >
               {t('Confirmer')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v3.3.0 — Confirmation : REDÉMARRAGE DE LA SÉANCE (demande de
+          l'enseignante). Toutes les réponses sont effacées, les étudiants
+          restent inscrits et retombent à l'accueil ; l'enseignant relance
+          le iRAT quand il veut. */}
+      <AlertDialog open={confirmRestart} onOpenChange={setConfirmRestart}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Redémarrer la séance ?')}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p className="font-medium text-red-700">
+                  {t(
+                    'Toutes les réponses enregistrées seront EFFACÉES : iRAT, tRAT, cas cliniques d’application, réclamations, évaluations par les pairs et questionnaire de fin.'
+                  )}
+                </p>
+                <p>
+                  {t(
+                    'Les étudiants inscrits et les équipes sont conservés : chacun se retrouve sur l’écran d’accueil, en attente du lancement du iRAT — personne n’a à rejoindre à nouveau.'
+                  )}
+                </p>
+                <p>
+                  {t(
+                    'Les questions, cas cliniques, réglages et le partage de la séance sont conservés tels quels.'
+                  )}
+                </p>
+                <p className="text-xs text-stone-500">
+                  {t(
+                    'Action idéale pour rejouer la même séance avec un nouveau groupe, ou repartir de zéro après un essai. Le redémarrage est consigné dans le Journal.'
+                  )}
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('Annuler')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              disabled={restarting}
+              onClick={async () => {
+                setConfirmRestart(false)
+                setRestarting(true)
+                const ok = await manage('restart_session')
+                setRestarting(false)
+                if (ok) {
+                  toast({
+                    title: t('Séance redémarrée'),
+                    description: t(
+                      'Les réponses ont été effacées : tous les étudiants sont revenus à l’accueil.'
+                    ),
+                  })
+                }
+              }}
+            >
+              <RotateCcw className="mr-1.5 h-4 w-4" />
+              {restarting ? t('Redémarrage…') : t('Redémarrer la séance')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1772,5 +1908,187 @@ function IratMinutesEditor({
         {t('OK')}
       </Button>
     </span>
+  )
+}
+
+// ============================================================
+// v3.3.0 — RUBRIQUE « JOURNAL » : modifications des enseignants
+//
+// Demande de l'enseignante : « une rubrique contenant le journal de
+// modifications par les enseignants serait nécessaire pour une
+// meilleure collaboration entre les enseignants ». Avec le partage
+// v3.2 (propriétaire + invités co-pilotent la même séance), chaque
+// modification est consignée avec son AUTEUR (compte connecté), son
+// heure et son origine (local / en ligne) : chacun voit ce que les
+// autres ont changé — plus de « qui a tourné la phase ?? ».
+// Lecture pure : le sondage du tableau de bord rafraîchit la liste.
+// ============================================================
+
+/** Libellé i18n d'une entrée du journal, selon son type + son action. */
+function journalEventLabel(
+  ev: JournalEntryDTO,
+  t: (key: string, params?: Record<string, string | number>) => string
+): string {
+  const p = ev.payload
+  const action = typeof p.action === 'string' ? p.action : ''
+  switch (ev.type) {
+    case 'phase': {
+      const fromLabel =
+        typeof p.from === 'string' && p.from in PHASE_INFO
+          ? PHASE_INFO[p.from as Phase].short
+          : String(p.from ?? '?')
+      const toLabel =
+        typeof p.to === 'string' && p.to in PHASE_INFO
+          ? PHASE_INFO[p.to as Phase].short
+          : String(p.to ?? '?')
+      return t('Phase : {from} → {to}', { from: t(fromLabel), to: t(toLabel) })
+    }
+    case 'case_open':
+      return t('Cas clinique lancé')
+    case 'reveal':
+      return t('Révélation des réponses demandée')
+    case 'appeal_decision':
+      return p.status === 'accepted' ? t('Réclamation acceptée') : t('Réclamation rejetée')
+    case 'restart':
+      return t('Séance redémarrée — réponses effacées')
+    case 'share':
+      return action === 'unshare_session' ? t('Partage retiré') : t('Partage ajouté')
+    case 'question_edit':
+      switch (action) {
+        case 'add_question':
+          return t('Question ajoutée')
+        case 'update_question':
+          return t('Question modifiée')
+        case 'move_question':
+          return t('Question déplacée')
+        case 'shuffle_quiz':
+          return t('Questions mélangées')
+        case 'delete_question':
+          return t('Question supprimée')
+        default:
+          return t('Question modifiée')
+      }
+    case 'team_edit':
+      switch (action) {
+        case 'set_team_count':
+          return t("Nombre d'équipes ajusté")
+        case 'rename_team':
+          return t('Équipe renommée')
+        case 'move_student':
+          return t('Étudiant changé d’équipe')
+        case 'auto_assign':
+          return t('Répartition automatique des équipes')
+        case 'remove_student':
+          return t('Étudiant exclu de la séance')
+        default:
+          return t('Équipes modifiées')
+      }
+    case 'session_edit':
+      switch (action) {
+        case 'launch_feedback':
+          return t('Feedback lancé')
+        case 'set_title':
+          return t('Titre de la séance modifié')
+        case 'set_pin':
+          return t('Code PIN modifié')
+        case 'set_irat_minutes':
+          return t('Durée du iRAT modifiée')
+        case 'add_case':
+          return t('Cas clinique ajouté')
+        case 'update_case':
+          return t('Cas clinique modifié')
+        case 'delete_case':
+          return t('Cas clinique supprimé')
+        case 'sai_update_item':
+          return t('Item du questionnaire modifié')
+        case 'sai_add_item':
+          return t('Item ajouté au questionnaire')
+        case 'sai_delete_item':
+          return t('Item supprimé du questionnaire')
+        case 'sai_reset':
+          return t('Questionnaire réinitialisé')
+        case 'delete_session':
+          return t('Séance mise à la corbeille')
+        case 'restore_session':
+          return t('Séance restaurée')
+        case 'delete_forever':
+          return t('Séance supprimée définitivement')
+        case 'duplicate_session':
+          return t('Séance dupliquée')
+        default:
+          return t('Réglage de la séance modifié')
+      }
+    default:
+      return t('Modification')
+  }
+}
+
+function JournalTab({ data }: { data: DashboardDTO }) {
+  const { t } = useI18n()
+  const events = data.journal ?? []
+  return (
+    <div className="space-y-4">
+      <InfoCard tone="emerald" title={t('Journal de la séance')}>
+        {t(
+          'Toutes les modifications faites par les enseignants de cette séance (propriétaire et invités) : qui a changé quoi, quand, depuis quelle version de l’application. Précieux quand plusieurs enseignants co-animent la même séance.'
+        )}
+      </InfoCard>
+      {events.length === 0 ? (
+        <div className="rounded-2xl border border-stone-200 bg-white p-6 text-center text-sm text-stone-500">
+          {t('Aucune modification enregistrée pour le moment — les actions des enseignants apparaîtront ici.')}
+        </div>
+      ) : (
+        <ol className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+          {events.map((ev) => {
+            const actor =
+              typeof ev.payload.actor === 'string' && ev.payload.actor.length > 0
+                ? ev.payload.actor
+                : null
+            const actorEmail =
+              typeof ev.payload.actorEmail === 'string' && ev.payload.actorEmail.length > 0
+                ? ev.payload.actorEmail
+                : null
+            const detail =
+              typeof ev.payload.detail === 'string' && ev.payload.detail.length > 0
+                ? ev.payload.detail
+                : null
+            return (
+              <li
+                key={ev.sequence}
+                className="rounded-xl border border-stone-200 bg-white px-3 py-2.5 shadow-sm"
+              >
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+                  <span className="font-mono text-xs text-stone-400">
+                    {formatDate(new Date(ev.createdAt), {
+                      dateStyle: 'short',
+                      timeStyle: 'medium',
+                    })}
+                  </span>
+                  <span className="font-semibold text-stone-800">
+                    {journalEventLabel(ev, t)}
+                  </span>
+                  <span
+                    className="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-medium text-stone-600"
+                    title={actorEmail ?? undefined}
+                  >
+                    {actor ?? t('Enseignant')}
+                  </span>
+                  {ev.origin === 'online' && (
+                    <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700">
+                      {t('version en ligne')}
+                    </span>
+                  )}
+                </div>
+                {detail && (
+                  <p className="mt-1 truncate text-xs text-stone-500" title={detail}>
+                    {detail}
+                  </p>
+                )}
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </div>
   )
 }

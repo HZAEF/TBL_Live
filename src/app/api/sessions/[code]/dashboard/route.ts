@@ -1,14 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { withMetrics } from '@/lib/metrics'
 import { db } from '@/lib/db'
 import { getSessionByCode, parseChoices, extractToken, safeEqualStrings } from '@/lib/tbl'
 import { applyLifecycle } from '@/lib/session-lifecycle'
+import { readRevParam } from '@/lib/revision'
+import { listCollaboratorsDetailed } from '@/lib/sharing'
+import { safeEventPayload, TEACHER_EVENT_TYPES } from '@/lib/write-queue'
 
 // GET /api/sessions/[code]/dashboard — données complètes du tableau de bord
 // enseignant. Jeton transmis par l'en-tête « Authorization: Bearer … » (les
 // URL des appels API ne contiennent plus le jeton → il n'apparaît pas dans
 // les journaux serveur) ; le repli ?token= reste accepté (onglets ouverts
 // avant une mise à jour de l'application).
-export async function GET(
+//
+// v2.9.0 — SONDAGE ALLÉGÉ : ?rev=N → si le compteur enseignant de la
+// séance vaut toujours N, réponse minuscule { unchanged: true } (une
+// requête au lieu de quatorze) ; le moindre changement (réponse
+// d'étudiant, signalement, phase…) redonne l'état complet.
+async function doGET(
   req: NextRequest,
   { params }: { params: Promise<{ code: string }> }
 ) {
@@ -34,7 +43,18 @@ export async function GET(
       )
     }
 
-    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals, alertEvents, saiItems, saiResponses, saiComments, saiDetailedResponses] =
+    // v2.9.0 — rien n'a changé depuis le dernier sondage du tableau de
+    // bord : réponse minuscule, sans reconstituer l'état complet.
+    const clientRev = readRevParam(req.nextUrl)
+    if (clientRev !== null && clientRev === live.revisionTeacher) {
+      return NextResponse.json({
+        unchanged: true,
+        revision: live.revisionTeacher,
+        serverNow: new Date().toISOString(),
+      })
+    }
+
+    const [questions, cases, teams, students, iratAnswers, tratAnswers, appeals, appAnswers, peerEvals, alertEvents, saiItems, saiResponses, saiComments, saiDetailedResponses, collaborators, ownerAccount, journalEvents] =
       await Promise.all([
         db.question.findMany({
           where: { sessionId: session.id },
@@ -95,19 +115,25 @@ export async function GET(
         }),
         // v2.5.0 : signalements anti-capture (capture suspectée / sortie
         // d'application) — les plus récents d'abord, volume borné.
-        db.alertEvent.findMany({
-          where: { student: { sessionId: session.id } },
-          orderBy: { createdAt: 'desc' },
-          take: 200,
-          select: {
-            id: true,
-            studentId: true,
-            kind: true,
-            phase: true,
-            createdAt: true,
-            student: { select: { name: true } },
-          },
-        }),
+        // v3.0.0 : requête EXÉCUTÉE uniquement si les signalements sont
+        // activés pour cette séance (défaut : désactivés) — une requête
+        // de moins à chaque sondage du tableau de bord, et l'onglet
+        // « Signalements » ne s'affiche pas.
+        live.reportsEnabled
+          ? db.alertEvent.findMany({
+              where: { student: { sessionId: session.id } },
+              orderBy: { createdAt: 'desc' },
+              take: 200,
+              select: {
+                id: true,
+                studentId: true,
+                kind: true,
+                phase: true,
+                createdAt: true,
+                student: { select: { name: true } },
+              },
+            })
+          : Promise.resolve([]),
         // v2.6.0 : questionnaire de fin de séance (TBL-SAI) — items de la
         // séance, réponses agrégées par item et commentaires libres.
         db.saiItem.findMany({
@@ -132,6 +158,34 @@ export async function GET(
           orderBy: { createdAt: 'asc' },
           select: { studentId: true, itemId: true, value: true },
         }),
+        // v3.2.0 : partage de la séance — liste des enseignants invités
+        // (avec statut de leur compte) + email du propriétaire (pour
+        // l'affichage « partagée par » dans l'onglet Configurations).
+        listCollaboratorsDetailed(session.id),
+        live.teacherId
+          ? db.teacherAccount.findUnique({
+              where: { id: live.teacherId },
+              select: { email: true, firstName: true, lastName: true },
+            })
+          : Promise.resolve(null),
+        // v3.3.0 — JOURNAL DES MODIFICATIONS ENSEIGNANTES : les 150
+        // dernières actions d'enseignant (phase, questions, équipes,
+        // réglages, partage, redémarrage…), la plus récente d'abord.
+        // Uniquement les types « action enseignante » (TEACHER_EVENT_
+        // TYPES) — le journal complet (y compris événements étudiants)
+        // reste disponible via export_events.
+        db.sessionEvent.findMany({
+          where: { sessionId: session.id, type: { in: [...TEACHER_EVENT_TYPES] } },
+          orderBy: { sequence: 'desc' },
+          take: 150,
+          select: {
+            sequence: true,
+            type: true,
+            payload: true,
+            origin: true,
+            createdAt: true,
+          },
+        }),
       ])
 
     // Questions RAT (iRAT + tRAT) en premier, exercices d'application ensuite —
@@ -150,6 +204,10 @@ export async function GET(
     questions.sort((a, b) => phaseRank(a.phase) - phaseRank(b.phase) || a.order - b.order)
 
     return NextResponse.json({
+      // v2.9.0 : compteur enseignant (sondage allégé) + heure serveur
+      // (minuteur iRAT synchronisé avec celui des étudiants).
+      revision: live.revisionTeacher,
+      serverNow: new Date().toISOString(),
       session: {
         id: live.id,
         code: live.code,
@@ -166,6 +224,17 @@ export async function GET(
         // Corbeille (null = séance active) et purge des données étudiantes
         deletedAt: live.deletedAt,
         dataPurgedAt: live.dataPurgedAt,
+        // v3.0.0 : signalements anti-capture activés pour cette séance ?
+        reportsEnabled: live.reportsEnabled === true,
+        // v3.2.0 : partage — enseignants invités (email, nom si le
+        // compte existe, statut du compte) et propriétaire. Un invité
+        // dont le compte n'existe pas encore reste listé : l'adminis-
+        // trateur est invité à le créer (même email) — la séance
+        // apparaîtra alors dans ses « Mes séances ».
+        collaborators,
+        owner: ownerAccount
+          ? { email: ownerAccount.email, name: `${ownerAccount.firstName} ${ownerAccount.lastName}` }
+          : null,
       },
       questions: questions.map((q) => ({
         id: q.id,
@@ -210,6 +279,15 @@ export async function GET(
         phase: a.phase,
         createdAt: a.createdAt,
       })),
+      // v3.3.0 — journal des modifications enseignantes (rubrique
+      // « Journal ») : payload parsé et sécurisé, jamais de secret.
+      journal: journalEvents.map((ev) => ({
+        sequence: ev.sequence,
+        type: ev.type,
+        payload: safeEventPayload(ev.payload),
+        origin: ev.origin,
+        createdAt: ev.createdAt.toISOString(),
+      })),
       // v2.6.0 — questionnaire TBL-SAI : items + agrégats par item +
       // commentaires. Les moyennes de sous-échelles sont calculées côté
       // client (inversion des items négatifs, libellés i18n).
@@ -245,3 +323,8 @@ export async function GET(
     return NextResponse.json({ error: 'Erreur serveur inattendue.' }, { status: 500 })
   }
 }
+
+export const GET = withMetrics<{ params: Promise<{ code: string }> }>(
+  'dashboard',
+  doGET
+)

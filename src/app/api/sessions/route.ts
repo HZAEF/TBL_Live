@@ -9,11 +9,30 @@ import {
   sanitizeCaseInput,
 } from '@/lib/tbl'
 import { hashPin } from '@/lib/pin'
+import { requireTeacher } from '@/lib/teacher-auth'
+import { logAdminEvent } from '@/lib/admin-journal'
 import { SAI_SUBSCALES, DEFAULT_SAI_ITEMS, type SaiSubscale } from '@/lib/sai'
 
 // POST /api/sessions — création d'une séance TBL
+//
+// v3.0.0 : la création exige un COMPTE ENSEIGNANT connecté (email
+// institutionnel + mot de passe, comptes créés par l'administrateur).
+// Plus de séance ouverte par n'importe qui : la séance enregistre le
+// compte propriétaire (visible par l'administrateur, suivi des TBL
+// par enseignant). Les étudiants, eux, rejoignent toujours librement
+// avec le code de la séance.
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireTeacher(req)
+    if (!auth.ok) {
+      return NextResponse.json(
+        {
+          error:
+            'Connexion enseignant requise : connectez-vous avec votre email institutionnel et votre mot de passe (compte créé par l’administrateur).',
+        },
+        { status: 401 }
+      )
+    }
     const body = await req.json().catch(() => null)
     if (!body || typeof body !== 'object') {
       return NextResponse.json({ error: 'Requête invalide' }, { status: 400 })
@@ -132,6 +151,8 @@ export async function POST(req: NextRequest) {
         teacherPin: teacherPinHash,
         teacherToken,
         iratMinutes,
+        // v3.0.0 : compte enseignant propriétaire de la séance.
+        teacherId: auth.teacher.id,
         teams: {
           create: Array.from({ length: teamCount }, (_, i) => ({
             name: `Équipe ${i + 1}`,
@@ -179,6 +200,15 @@ export async function POST(req: NextRequest) {
         },
       })
     }
+
+    // v3.4.0 — JOURNAL ADMIN : création d'une séance TBL, PAR QUI
+    // (email du compte connecté). Aucun secret (titre + code).
+    await logAdminEvent(
+      'session_created',
+      auth.teacher.email,
+      `${session.code} — ${title.slice(0, 80)} (${teamCount} équipes)`,
+      session.code
+    )
 
     return NextResponse.json({ code: session.code, teacherToken })
   } catch (e) {

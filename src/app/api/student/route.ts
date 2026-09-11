@@ -1,24 +1,67 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { parseChoices, extractToken } from '@/lib/tbl'
-import { computeRevealedAppQuestionIds } from '@/lib/tbl-types'
+import { extractToken, normalizeName } from '@/lib/tbl'
 import { computeRankFor } from '@/lib/grades'
-import { computeAllFinalGrades } from '@/lib/final-results'
+import { bumpRevisions, bumpTeamRevision, readRevParam } from '@/lib/revision'
+import { recordRequest } from '@/lib/metrics'
+import { rateLimit, RATE_STUDENT } from '@/lib/rate-limit'
+import { withSessionWrite, recordSessionEvent, eventOriginFromHeader } from '@/lib/write-queue'
+import {
+  getBaseState,
+  getFinals,
+  getIratStats,
+  getSaiItems,
+} from '@/lib/student-state-cache'
 
+// ============================================================
 // GET /api/student — état complet de l'étudiant selon la phase en cours.
 // Jeton transmis par l'en-tête « Authorization: Bearer … » (repli ?token=
 // accepté pour les onglets ouverts avant une mise à jour).
+//
+// v2.9.0 — SONDAGE ALLÉGÉ : ?rev=N → { unchanged: true } si rien
+// n'a changé (une requête, quelques octets).
+//
+// v3.0.0 — TROIS accélérations décisives pour les grandes classes :
+//  1. ?rev=N&trev=M : la réponse « rien n'a changé » tient compte
+//     AUSSI de la révision de l'ÉQUIPE de l'étudiant (tentatives
+//     tRAT) — les membres d'une équipe seuls renouvellent ;
+//  2. L'ÉTAT PARTAGÉ de la séance (questions, cas, équipes, réponses
+//     d'application, réclamations, statistiques, notes finales) est
+//     construit UNE SEULE fois par révision et servi à tous : 150
+//     étudiants qui arrivent en même temps = 1 construction + 150
+//     petites requêtes personnelles, plus 1500 requêtes identiques ;
+//  3. Seules les données PROPRE à l'étudiant sont relues à chaque
+//     demande (ses réponses iRAT, ses évaluations par les pairs).
+// ============================================================
 export async function GET(req: NextRequest) {
+  const started = Date.now()
+  let tokenForMetrics: string | undefined
   try {
     const token = extractToken(req)
     if (!token) {
       return NextResponse.json({ error: 'Jeton manquant.' }, { status: 400 })
     }
+    // v3.2.0 — garde-fou de débit (audit point n°5) : l'état complet
+    // n'est tiré qu'aux changements de numéro — un client sain reste
+    // loin du plafond ; un client défaillant reçoit 429 + Retry-After
+    // et son backoff double son délai tout seul.
+    const verdict = rateLimit(`stu:${token}`, RATE_STUDENT)
+    if (!verdict.ok) {
+      recordRequest('student', Date.now() - started, false)
+      const res = NextResponse.json(
+        { error: 'Trop de requêtes — ralentissez, la séance continue.' },
+        { status: 429 }
+      )
+      res.headers.set('Retry-After', String(verdict.retryAfterSec))
+      return res
+    }
+    tokenForMetrics = token
     const student = await db.student.findUnique({
       where: { token },
       include: { session: true, team: true },
     })
     if (!student) {
+      recordRequest('student', Date.now() - started, false)
       return NextResponse.json(
         { error: 'Connexion perdue. Rejoignez à nouveau la séance.' },
         { status: 404 }
@@ -26,6 +69,7 @@ export async function GET(req: NextRequest) {
     }
     // Séance mise à la corbeille par l'enseignant : l'étudiant est bloqué.
     if (student.session.deletedAt) {
+      recordRequest('student', Date.now() - started, false)
       return NextResponse.json(
         { error: 'Cette séance a été supprimée par l\u2019enseignant.' },
         { status: 410 }
@@ -34,6 +78,35 @@ export async function GET(req: NextRequest) {
 
     const session = student.session
     const status = session.status
+    const teamRevision = student.team ? student.team.revisionTeam : null
+
+    // v3.0.0 — rien n'a changé pour les étudiants depuis le dernier
+    // sondage : réponse minuscule, immédiate. Deux numéros :
+    //  - ?rev=  : révision GLOBALE (toujours vérifiée) ;
+    //  - ?trev= : révision de l'ÉQUIPE de l'étudiant (vérifiée
+    //    UNIQUEMENT si le client l'envoie — les onglets ouverts sur
+    //    la v2.9 au moment de la mise à jour ne l'envoient pas : ils
+    //    gardent exactement le comportement d'avant, sans casse).
+    const clientRev = readRevParam(req.nextUrl)
+    const trevRaw = req.nextUrl.searchParams.get('trev')
+    const clientTeamRev = (() => {
+      if (trevRaw === null) return null
+      if (trevRaw === 'null') return null
+      const n = Number(trevRaw)
+      return Number.isInteger(n) && n >= 0 && n <= 2_000_000_000 ? n : null
+    })()
+    if (
+      clientRev !== null &&
+      clientRev === session.revision &&
+      (trevRaw === null || clientTeamRev === teamRevision)
+    ) {
+      recordRequest('student', Date.now() - started, true, token)
+      return NextResponse.json({
+        unchanged: true,
+        revision: session.revision,
+        serverNow: new Date().toISOString(),
+      })
+    }
 
     // v2.7.0 — Écran d'attente AVANT le feedback : tant que l'enseignant
     // n'a pas cliqué « Lancer le feedback », AUCUNE donnée de résultats
@@ -41,14 +114,11 @@ export async function GET(req: NextRequest) {
     // statistiques) : rien à capturer d'écran, l'attention reste sur le
     // tableau. Le payload minimal ne contient que l'en-tête habituel.
     if (status === 'feedback' && !session.feedbackReady) {
-      const teamMembersWaiting = student.teamId
-        ? await db.student.findMany({
-            where: { teamId: student.teamId },
-            orderBy: { createdAt: 'asc' },
-            select: { id: true, name: true },
-          })
-        : []
+      recordRequest('student', Date.now() - started, true, token)
       return NextResponse.json({
+        revision: session.revision,
+        teamRevision,
+        serverNow: new Date().toISOString(),
         session: {
           code: session.code,
           title: session.title,
@@ -57,6 +127,8 @@ export async function GET(req: NextRequest) {
           iratMinutes: session.iratMinutes,
           revealed: session.revealed,
           feedbackReady: false,
+          // v3.0.0 : signalements anti-capture activés ou non.
+          reportsEnabled: session.reportsEnabled,
         },
         me: {
           id: student.id,
@@ -65,7 +137,11 @@ export async function GET(req: NextRequest) {
           saiCompletedAt: student.saiCompletedAt ? student.saiCompletedAt.toISOString() : null,
           team: student.team ? { id: student.team.id, name: student.team.name } : null,
         },
-        teamMembers: teamMembersWaiting,
+        teamMembers: student.teamId
+          ? (await getBaseState(session.id, session.revision, session.revealed)).students
+              .filter((s) => s.teamId === student.teamId)
+              .map((s) => ({ id: s.id, name: s.name }))
+          : [],
         questions: [],
         applicationQuestions: [],
         appCases: [],
@@ -77,109 +153,86 @@ export async function GET(req: NextRequest) {
       })
     }
 
-    const [teamMembers, ratQuestions, appQuestions, cases, myIratAnswers, teamTratAnswers, myAppeals, teamAppAnswers, allStudents, allAppAnswersRaw] =
-      await Promise.all([
-        student.teamId
-          ? db.student.findMany({
-              where: { teamId: student.teamId },
-              orderBy: { createdAt: 'asc' },
-              select: { id: true, name: true },
-            })
-          : Promise.resolve([]),
-        db.question.findMany({
-          where: { sessionId: session.id, phase: 'rat' },
-          orderBy: [{ order: 'asc' }],
-        }),
-        db.question.findMany({
-          where: { sessionId: session.id, phase: 'application' },
-          orderBy: [{ order: 'asc' }],
-        }),
-        db.case.findMany({
-          where: { sessionId: session.id },
-          orderBy: [{ order: 'asc' }, { id: 'asc' }],
-        }),
-        db.answer.findMany({
-          where: { studentId: student.id, kind: 'irat', question: { phase: 'rat' } },
-          // v2.4.0 : champs strictement nécessaires (allège le sondage)
-          select: { questionId: true, choice: true, isCorrect: true, score: true },
-        }),
-        student.teamId
-          ? db.answer.findMany({
-              where: { teamId: student.teamId, kind: 'trat', question: { phase: 'rat' } },
-              orderBy: { attempt: 'asc' },
-              select: { questionId: true, choice: true, attempt: true, isCorrect: true, score: true },
-            })
-          : Promise.resolve([]),
-        student.teamId
-          ? db.appeal.findMany({ where: { teamId: student.teamId } })
-          : Promise.resolve([]),
-        student.teamId
-          ? db.appAnswer.findMany({ where: { teamId: student.teamId } })
-          : Promise.resolve([]),
-        db.student.findMany({
-          where: { sessionId: session.id },
-          select: { teamId: true },
-        }),
-        // Réponses d'application de toutes les équipes — ne seront renvoyées
-        // que pour les questions déjà révélées (voir plus bas).
-        db.appAnswer.findMany({
-          where: { question: { sessionId: session.id, phase: 'application' } },
-          include: { team: { select: { name: true, number: true } } },
-        }),
-      ])
+    // v3.0.0 — ÉTAT PARTAGÉ : une construction par révision, servie
+    // à toute la classe (voir student-state-cache.ts).
+    const base = await getBaseState(session.id, session.revision, session.revealed)
 
-    // v2.7.0 — Cas cliniques lancés : seuls les cas OUVERTS par
-    // l'enseignant (bouton « Lancer le cas clinique N ») sont envoyés
-    // aux étudiants — énoncé, questions et réponses des autres équipes
-    // des cas non lancés ne quittent jamais le serveur. Les étudiants
-    // voient une page d'attente neutre entre chaque cas, pour que
-    // l'enseignant puisse expliquer chaque cas séparément.
-    const openedCaseIds = new Set(cases.filter((c) => c.opened).map((c) => c.id))
-    const accessibleAppQuestions = appQuestions.filter(
-      (q) => !q.caseId || openedCaseIds.has(q.caseId)
-    )
+    // Les bonnes réponses ne sont divulguées qu'après les tests (iRAT + tRAT).
+    // v2.6.0 : PLUS JAMAIS en fin de séance (statut « finished »).
+    const revealCorrect = ['appeal', 'feedback'].includes(status)
+    const revealedSet = new Set(base.revealedAppQuestionIds)
 
     const mapQuestion = (
-      q: (typeof ratQuestions)[number] | (typeof appQuestions)[number],
-      withCorrect: boolean
+      q: (typeof base.ratQuestions)[number] | (typeof base.appQuestions)[number],
+      withCorrect: boolean,
+      phase: 'rat' | 'application'
     ) => ({
       id: q.id,
       text: q.text,
-      choices: parseChoices(q.choices),
+      choices: q.choices,
       correct: withCorrect ? q.correct : undefined,
-      phase: q.phase,
+      phase,
       caseId: q.caseId,
     })
 
-    // Les bonnes réponses ne sont divulguées qu'après les tests (iRAT + tRAT).
-    // v2.6.0 : PLUS JAMAIS en fin de séance (statut « finished ») : la page
-    // de fin n'affiche plus les corrections (risque de capture d'écran et
-    // de divulgation hors classe) et la note finale est calculée côté
-    // serveur — le « corrigé » ne transite plus du tout vers l'étudiant.
-    const revealCorrect = ['appeal', 'feedback'].includes(status)
+    // ----- Données propres à l'étudiant (relues à chaque demande) -----
+    // v3.0.0 : parallélisées avec la construction éventuelle du cache.
+    // v3.3.0 : les tentatives tRAT de SON ÉQUIPE sont relues ICI, à
+    // chaque demande — elles vivent sous le compteur de révision
+    // d'équipe (pas la révision globale) : les servir depuis le cache
+    // « révision globale » renvoyait une carte périmée après un
+    // grattage → expectedAttempt décalé → 409 en boucle (correctif du
+    // bug fatal « l'équipe ne peut plus gratter »). Une petite requête
+    // indexée par équipe, comme les réponses iRAT personnelles.
+    const needPeer = status === 'peer' || status === 'finished'
+    const [myIratAnswers, myPeerEvals, receivedEvals, teamTratRows] = await Promise.all([
+      db.answer.findMany({
+        where: { studentId: student.id, kind: 'irat', question: { phase: 'rat' } },
+        select: { questionId: true, choice: true, isCorrect: true, score: true },
+      }),
+      needPeer
+        ? db.peerEval.findMany({
+            where: { evaluatorId: student.id },
+            select: { evaluatedId: true, score: true, comment: true },
+          })
+        : Promise.resolve([]),
+      needPeer
+        ? db.peerEval.findMany({
+            where: { evaluatedId: student.id },
+            select: { score: true },
+          })
+        : Promise.resolve([]),
+      student.teamId
+        ? db.answer.findMany({
+            where: {
+              teamId: student.teamId,
+              kind: 'trat',
+              question: { sessionId: session.id, phase: 'rat' },
+            },
+            orderBy: { attempt: 'asc' },
+            select: { questionId: true, choice: true, attempt: true, isCorrect: true, score: true },
+          })
+        : Promise.resolve([]),
+    ])
 
-    // ----- Révélation automatique par question d'application -----
-    // Une question est révélée dès que toutes les équipes actives (au moins
-    // un étudiant) y ont répondu, ou si l'enseignant force la révélation.
-    // v2.7.0 : calcul limité aux questions accessibles (cas lancés) — les
-    // questions d'un cas non lancé ne peuvent pas recevoir de réponses.
-    const activeTeamIds = [
-      ...new Set(allStudents.filter((s) => s.teamId).map((s) => s.teamId as string)),
-    ]
-    const revealedAppQuestionIds = computeRevealedAppQuestionIds({
-      appQuestionIds: accessibleAppQuestions.map((q) => q.id),
-      activeTeamIds,
-      appAnswers: allAppAnswersRaw.map((a) => ({ teamId: a.teamId, questionId: a.questionId })),
-      forcedReveal: session.revealed,
-    })
-
-    // Pour l'application : bonne réponse divulguée question par question,
-    // seulement une fois révélée pendant la phase d'application — jamais
-    // après la fin de la séance (v2.6.0, cf. revealCorrect ci-dessus).
-    const revealAppCorrect = (questionId: string) =>
-      status !== 'finished' && revealedAppQuestionIds.includes(questionId)
+    const teamId = student.teamId
+    // v3.3.0 — tentatives fraîches de l'équipe (voir plus haut).
+    const teamTratAnswers = teamTratRows
+    const myAppeals = teamId ? (base.appealsByTeam.get(teamId) ?? []) : []
+    const accessibleQIds = new Set(base.accessibleAppQuestionIds)
+    const teamAppAnswers = teamId
+      ? base.appAnswers
+          .filter((a) => a.teamId === teamId && accessibleQIds.has(a.questionId))
+          .map((a) => ({ questionId: a.questionId, choice: a.choice, text: a.text }))
+      : []
+    const teamMembers = teamId
+      ? base.students.filter((s) => s.teamId === teamId).map((s) => ({ id: s.id, name: s.name }))
+      : []
 
     const response: Record<string, unknown> = {
+      revision: session.revision,
+      teamRevision,
+      serverNow: new Date().toISOString(),
       session: {
         code: session.code,
         title: session.title,
@@ -188,6 +241,9 @@ export async function GET(req: NextRequest) {
         iratMinutes: session.iratMinutes,
         revealed: session.revealed,
         feedbackReady: session.feedbackReady,
+        // v3.0.0 : signalements anti-capture activés ou non (l'app
+        // étudiante cesse de les envoyer quand c'est désactivé).
+        reportsEnabled: session.reportsEnabled,
       },
       me: {
         id: student.id,
@@ -199,19 +255,21 @@ export async function GET(req: NextRequest) {
         team: student.team ? { id: student.team.id, name: student.team.name } : null,
       },
       teamMembers,
-      questions: ratQuestions.map((q) => mapQuestion(q, revealCorrect)),
+      questions: base.ratQuestions.map((q) => mapQuestion(q, revealCorrect, 'rat')),
       // v2.7.0 : seules les questions des cas LANCÉS sont envoyées.
-      applicationQuestions: accessibleAppQuestions.map((q) => mapQuestion(q, revealAppCorrect(q.id))),
-      // v2.7.0 : tous les cas sont listés (sélecteur + page d'attente)
-      // mais le titre et l'énoncé d'un cas non lancé ne sont PAS envoyés.
-      appCases: cases.map((c) => ({
+      applicationQuestions: base.appQuestions
+        .filter((q) => !q.caseId || base.openedCaseIds.has(q.caseId))
+        .map((q) => mapQuestion(q, status !== 'finished' && revealedSet.has(q.id), 'application')),
+      // v2.7.0 : tous les cas sont listés mais le titre et l'énoncé
+      // d'un cas non lancé ne sont PAS envoyés.
+      appCases: base.cases.map((c) => ({
         id: c.id,
         title: c.opened ? c.title : null,
         intro: c.opened ? c.intro : null,
         order: c.order,
         opened: c.opened,
       })),
-      revealedAppQuestionIds,
+      revealedAppQuestionIds: base.revealedAppQuestionIds,
       myIratAnswers: myIratAnswers.map((a) => ({
         questionId: a.questionId,
         choice: a.choice,
@@ -231,84 +289,43 @@ export async function GET(req: NextRequest) {
         text: a.text,
         status: a.status,
       })),
-      // v2.7.0 : réponses de mon équipe limitées aux questions accessibles.
-      teamAppAnswers: (() => {
-        const accessibleQIds = new Set(accessibleAppQuestions.map((q) => q.id))
-        return teamAppAnswers
-          .filter((a) => accessibleQIds.has(a.questionId))
-          .map((a) => ({
-            questionId: a.questionId,
-            choice: a.choice,
-            text: a.text,
-          }))
-      })(),
+      teamAppAnswers,
     }
 
     // ----- Phase réclamations : bouton « pas de réclamation » + progression -----
     if (status === 'appeal') {
-      const teams = await db.team.findMany({ where: { sessionId: session.id } })
-      const activeIds = new Set(activeTeamIds)
-      const doneCount = teams.filter((t) => activeIds.has(t.id) && t.appealsDone).length
+      const activeIds = new Set(base.activeTeamIds)
+      const doneCount = base.teams.filter((t) => activeIds.has(t.id) && t.appealsDone).length
       response.myTeamAppealsDone = student.team ? student.team.appealsDone : false
-      response.appealsProgress = { done: doneCount, total: activeTeamIds.length }
+      response.appealsProgress = { done: doneCount, total: base.activeTeamIds.length }
     }
 
     // ----- Phase application : progression des équipes par question -----
-    // v2.7.0 : limitée aux questions accessibles (cas lancés).
     if (status === 'application') {
-      response.appAnswerProgress = accessibleAppQuestions.map((q) => ({
-        questionId: q.id,
-        answered: allAppAnswersRaw.filter((a) => a.questionId === q.id).length,
-        total: activeTeamIds.length,
-      }))
+      response.appAnswerProgress = base.appAnswerProgress
     }
 
-    // Statistiques de classe pour la phase de feedback (v2.6.0 : plus en
-    // fin de séance — la page de fin n'affiche plus de statistiques).
+    // Statistiques de classe pour la phase de feedback (v3.0.0 :
+    // partagées par toute la classe — un seul calcul par révision).
     if (status === 'feedback') {
-      const allIrat = await db.answer.findMany({
-        where: { kind: 'irat', question: { sessionId: session.id, phase: 'rat' } },
-        select: { questionId: true, isCorrect: true },
-      })
-      const perQuestion = new Map<string, { total: number; correct: number }>()
-      for (const a of allIrat) {
-        const stat = perQuestion.get(a.questionId) || { total: 0, correct: 0 }
-        stat.total += 1
-        if (a.isCorrect) stat.correct += 1
-        perQuestion.set(a.questionId, stat)
-      }
-      response.iratStats = Array.from(perQuestion.entries()).map(([questionId, s]) => ({
-        questionId,
-        percent: s.total > 0 ? Math.round((s.correct / s.total) * 100) : 0,
-      }))
+      const stats = await getIratStats(session.id, session.revision)
+      response.iratStats = stats.perQuestion
     }
 
     // Réponses de toutes les équipes — uniquement pour les questions
     // révélées PENDANT la phase d'application (jamais en fin de séance).
-    if (status !== 'finished' && revealedAppQuestionIds.length > 0) {
-      const revealed = new Set(revealedAppQuestionIds)
-      response.allTeamAppAnswers = allAppAnswersRaw
-        .filter((a) => revealed.has(a.questionId))
-        .map((a) => ({
-          teamName: a.team.name,
-          questionId: a.questionId,
-          choice: a.choice,
-          text: a.text,
-        }))
+    if (status !== 'finished' && base.revealedAppQuestionIds.length > 0) {
+      response.allTeamAppAnswers = base.allTeamAppAnswers.map((a) => ({
+        teamName: a.teamName,
+        questionId: a.questionId,
+        choice: a.choice,
+        text: a.text,
+      }))
     }
 
     // Évaluation par les pairs
-    if (status === 'peer' || status === 'finished') {
-      const myPeerEvals = await db.peerEval.findMany({
-        where: { evaluatorId: student.id },
-        select: { evaluatedId: true, score: true, comment: true },
-      })
+    if (needPeer) {
       response.myPeerEvals = myPeerEvals
-      // Moyenne des notes reçues (utile à l'écran de fin pour la note finale)
-      const receivedEvals = await db.peerEval.findMany({
-        where: { evaluatedId: student.id },
-        select: { score: true },
-      })
       response.myPeerReceived =
         receivedEvals.length > 0
           ? {
@@ -319,28 +336,15 @@ export async function GET(req: NextRequest) {
     }
 
     // v2.6.0 — Fin de séance : questionnaire TBL-SAI puis note + rang.
-    // Le questionnaire (items de la séance) n'est envoyé qu'AVANT la
-    // soumission ; la note finale et le rang ne sont envoyés qu'APRÈS —
-    // l'étudiant doit répondre pour y accéder (verrou serveur : impossible
-    // de contourner en lisant les données de l'API).
     if (status === 'finished') {
       if (!student.saiCompletedAt) {
-        const saiItems = await db.saiItem.findMany({
-          where: { sessionId: session.id },
-          orderBy: [{ order: 'asc' }, { id: 'asc' }],
-          select: { id: true, subscale: true, textKey: true, text: true, reversed: true },
-        })
-        response.saiItems = saiItems.map((it) => ({
-          id: it.id,
-          subscale: it.subscale as 'accountability' | 'preference' | 'satisfaction',
-          textKey: it.textKey,
-          text: it.text,
-          reversed: it.reversed,
-        }))
+        const sai = await getSaiItems(session.id, session.revision)
+        response.saiItems = sai.items
       } else {
-        // Questionnaire déjà soumis : note finale (calcul serveur, cf.
-        // final-results.ts) + rang parmi les étudiants notés de la séance.
-        const finals = await computeAllFinalGrades(session.id)
+        // Notes finales : UN calcul pour toute la classe (clé =
+        // révision + révision enseignant : les évaluations par les
+        // pairs arrivant en fin de séance sont prises en compte).
+        const finals = await getFinals(session.id, session.revision, session.revisionTeacher)
         const mine = finals.find((f) => f.studentId === student.id)
         response.finalNote = mine ? mine.grade.final : null
         response.myRank = computeRankFor(
@@ -350,9 +354,175 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // v3.4.0 — ÉDITION NOM/ÉQUIPE pendant l'attente : la liste des
+    // équipes de la séance n'est envoyée QU'en phase lobby (après le
+    // début du iRAT, la modification est interdite côté serveur — la
+    // liste devient inutile : rien n'est transmis pour rien).
+    if (status === 'lobby') {
+      response.teams = base.teams.map((t) => ({ id: t.id, name: t.name }))
+    }
+
+    recordRequest('student', Date.now() - started, true, token)
     return NextResponse.json(response)
   } catch (e) {
+    recordRequest('student', Date.now() - started, false, tokenForMetrics)
     console.error('GET /api/student', e)
+    return NextResponse.json({ error: 'Erreur serveur inattendue.' }, { status: 500 })
+  }
+}
+
+// ============================================================
+// POST /api/student — v3.4.0 : corriger son nom / son équipe.
+//
+// Demande de l'enseignante : « en attendant le début de la séance,
+// dans l'accueil, je veux que l'étudiant ait la main pour corriger
+// son nom et le numéro de l'équipe » — deux boutons à côté de
+// « Quitter ». Dès que le iRAT COMMENCE (phase ≠ lobby), plus
+// aucune modification : les réponses et les scores sont figés.
+//
+// RÈGLES :
+//  - jeton étudiant (Authorization: Bearer) → l'étudiant lui-même,
+//    jamais un autre : le nom est vérifié contre les homonymes
+//    (normalizeName, comme /api/join) en s'excluant soi-même ;
+//  - équipe : doit appartenir à la MÊME séance ;
+//  - uniquement en phase « lobby » (409 sinon, message clair) ;
+//  - sous le verrou d'écriture de la séance ;
+//  - updatedAt est rafraîchi → la fusion Internet ↔ local adopte la
+//    version la plus récente (comme tout le reste) ;
+//  - compteurs de révision incrémentés (global + équipe(s)) : tous
+//    les écrans concernés se rafraîchissent seuls (l'étudiant, les
+//    coéquipiers, le tableau de bord) ;
+//  - événement « profile » au journal de séance (propagation delta).
+// ============================================================
+
+interface ProfileAction {
+  action?: unknown
+  name?: unknown
+  teamId?: unknown
+}
+
+export async function POST(req: NextRequest) {
+  const started = Date.now()
+  try {
+    const token = extractToken(req)
+    if (!token) {
+      return NextResponse.json({ error: 'Jeton manquant.' }, { status: 400 })
+    }
+    const verdict = rateLimit(`stu:${token}`, RATE_STUDENT)
+    if (!verdict.ok) {
+      const res = NextResponse.json(
+        { error: 'Trop de requêtes — ralentissez, la séance continue.' },
+        { status: 429 }
+      )
+      res.headers.set('Retry-After', String(verdict.retryAfterSec))
+      return res
+    }
+    const body = (await req.json().catch(() => null)) as ProfileAction | null
+    if (body?.action !== 'update_profile') {
+      return NextResponse.json({ error: 'Action inconnue.' }, { status: 400 })
+    }
+    const student = await db.student.findUnique({
+      where: { token },
+      include: { session: true },
+    })
+    if (!student || student.session.deletedAt) {
+      recordRequest('student', Date.now() - started, false)
+      return NextResponse.json(
+        { error: 'Connexion perdue. Rejoignez à nouveau la séance.' },
+        { status: 404 }
+      )
+    }
+    // Le iRAT a commencé (ou la séance est déjà avancée) : figé.
+    if (student.session.status !== 'lobby') {
+      return NextResponse.json(
+        {
+          error:
+            'La séance a déjà commencé : votre nom et votre équipe ne peuvent plus être modifiés. Demandez à votre professeur en cas d’erreur.',
+        },
+        { status: 409 }
+      )
+    }
+
+    const sessionId = student.session.id
+    const newName =
+      typeof body.name === 'string' && body.name.trim().length > 0 ? body.name.trim().slice(0, 40) : null
+    const newTeamId = typeof body.teamId === 'string' && body.teamId.length > 0 ? body.teamId : null
+    if (!newName && !newTeamId) {
+      return NextResponse.json(
+        { error: 'Rien à modifier : fournissez un nom ou une équipe.' },
+        { status: 400 }
+      )
+    }
+
+    const origin = eventOriginFromHeader(req.headers.get('x-tbl-origin'))
+    const result = await withSessionWrite(sessionId, 'student', async (): Promise<
+      { ok: true; name: string; teamId: string | null } | { ok: false; error: string; status: 400 | 409 }
+    > => {
+      // ----- Nom : validé + sans collision avec un AUTRE étudiant -----
+      if (newName) {
+        if (newName.length < 2) {
+          return { ok: false, error: 'Votre nom doit contenir au moins 2 caractères.', status: 400 }
+        }
+        const others = await db.student.findMany({
+          where: { sessionId, id: { not: student.id } },
+          select: { name: true },
+        })
+        if (others.some((o) => normalizeName(o.name) === normalizeName(newName))) {
+          return {
+            ok: false,
+            error:
+              'Ce nom est déjà utilisé par un autre étudiant de la séance. Ajoutez votre nom de famille pour vous différencier.',
+            status: 409,
+          }
+        }
+      }
+      // ----- Équipe : doit appartenir à la séance -----
+      if (newTeamId) {
+        const team = await db.team.findFirst({
+          where: { id: newTeamId, sessionId },
+          select: { id: true, number: true },
+        })
+        if (!team) {
+          return { ok: false, error: 'Équipe introuvable dans cette séance.', status: 400 }
+        }
+      }
+      // ----- Application : updatedAt rafraîchi (fusion LWW), événement,
+      // compteurs (l'écran de l'étudiant, ses coéquipiers des DEUX équipes
+      // et le tableau de bord se rafraîchissent seuls) -----
+      const previousTeamId = student.teamId
+      const data: Record<string, unknown> = { updatedAt: new Date() }
+      if (newName) data.name = newName
+      if (newTeamId) data.teamId = newTeamId
+      const updated = await db.student.update({ where: { id: student.id }, data })
+      await bumpRevisions(sessionId)
+      if (previousTeamId && previousTeamId !== updated.teamId) {
+        await bumpTeamRevision(sessionId, previousTeamId)
+      }
+      if (updated.teamId && updated.teamId !== previousTeamId) {
+        await bumpTeamRevision(sessionId, updated.teamId)
+      }
+      await recordSessionEvent(
+        sessionId,
+        'profile',
+        student.id,
+        {
+          ...(newName ? { name: newName } : {}),
+          ...(newTeamId ? { teamId: newTeamId } : {}),
+        },
+        origin
+      )
+      return { ok: true, name: updated.name, teamId: updated.teamId }
+    })
+
+    if (!result.ok) {
+      recordRequest('student', Date.now() - started, false, token)
+      return NextResponse.json({ error: result.error }, { status: result.status })
+    }
+    recordRequest('student', Date.now() - started, true, token)
+    return NextResponse.json({ ok: true, name: result.name, teamId: result.teamId })
+  } catch (e) {
+    recordRequest('student', Date.now() - started, false)
+    console.error('POST /api/student', e)
     return NextResponse.json({ error: 'Erreur serveur inattendue.' }, { status: 500 })
   }
 }

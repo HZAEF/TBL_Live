@@ -23,9 +23,20 @@ import {
 } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { initLangFromStorage, useI18n } from '@/lib/i18n'
+import { getTheme, loadAppConfig } from '@/lib/app-config'
+import { ICONS, customIconUrl } from '@/lib/theme-client'
 import { LangPicker } from './lang-picker'
 
 type Role = 'home' | 'teacher' | 'student'
+
+// v3.0.0 — icônes personnalisables (Apparence de /admin) : références
+// de niveau module (identités stables, aucun composant créé au rendu).
+// v3.0.0 — table complète des icônes personnalisables (Apparence) :
+// le nom choisi par l'administrateur est résolu ici, avec repli sur
+// l'icône d'origine.
+const LOGO_ICONS = ICONS
+const TEACHER_ICONS = ICONS
+const STUDENT_ICONS = ICONS
 
 // Libellés français = clés de traduction (traduits au rendu)
 const TBL_STEPS = [
@@ -69,10 +80,23 @@ const TBL_STEPS = [
 export function TblApp() {
   const [role, setRole] = useState<Role>('home')
   const { t } = useI18n()
+  // v3.0.0 — icônes personnalisées par l'administrateur (Apparence).
+  const [themeReady, setThemeReady] = useState(false)
 
   // Restaure la langue choisie (après hydratation → aucun décalage)
   useEffect(() => {
     initLangFromStorage()
+  }, [])
+
+  // v2.9.0 — Configuration publique de l'application (une requête
+  // minuscule au démarrage) : délai de synchronisation + textes
+  // personnalisés par l'administrateur (/admin). En cas d'échec
+  // (hors ligne, base indisponible), les réglages d'origine s'appliquent.
+  // v3.0.0 — le thème (couleurs + icônes) arrive avec : les couleurs
+  // sont posées en variables CSS (toute l'application suit), les
+  // icônes de l'accueil sont relues ici.
+  useEffect(() => {
+    void loadAppConfig().then(() => setThemeReady(true))
   }, [])
 
   return (
@@ -81,7 +105,7 @@ export function TblApp() {
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-2 px-4">
           <div className="flex min-w-0 items-center gap-2">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white">
-              <GraduationCap className="h-5 w-5" />
+              <HeaderLogo ready={themeReady} />
             </div>
             <div className="min-w-0">
               <p className="text-[15px] font-bold leading-none tracking-tight text-stone-900">
@@ -117,11 +141,22 @@ export function TblApp() {
               'TBL Live — Application libre d’apprentissage en équipe, pour l’enseignement.'
             )}
           </p>
-          <p>
-            {t(
-              'iRAT · tRAT · Réclamations · Application · Évaluation par les pairs'
-            )}
-          </p>
+          <div className="flex items-center gap-3">
+            <p>
+              {t(
+                'iRAT · tRAT · Réclamations · Application · Évaluation par les pairs'
+              )}
+            </p>
+            {/* v2.9.0 — accès discret à l'espace administrateur (mot de
+                passe propre, voir /admin). */}
+            <a
+              href="/admin"
+              className="rounded px-1.5 py-0.5 font-semibold text-stone-400 underline-offset-2 hover:text-stone-700 hover:underline"
+              title={t('Espace administrateur')}
+            >
+              {t('Admin')}
+            </a>
+          </div>
         </div>
       </footer>
     </div>
@@ -188,7 +223,7 @@ function HomeView({ onSelect }: { onSelect: (r: Role) => void }) {
           )}
         >
           <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
-            <GraduationCap className="h-6 w-6" />
+            <CardIcon kind="teacher" />
           </span>
           <span>
             <span className="block text-lg font-bold text-stone-900">
@@ -210,7 +245,7 @@ function HomeView({ onSelect }: { onSelect: (r: Role) => void }) {
           )}
         >
           <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
-            <Users className="h-6 w-6" />
+            <CardIcon kind="student" />
           </span>
           <span>
             <span className="block text-lg font-bold text-stone-900">
@@ -280,4 +315,33 @@ function HomeView({ onSelect }: { onSelect: (r: Role) => void }) {
       </Collapsible>
     </div>
   )
+}
+
+// v3.0.0 — icônes pilotées par le thème administrateur (références
+// stables de niveau module : GraduationCap / Users par défaut).
+// v3.1.0 — si l'administrateur a TÉLÉVERSÉ une image pour cet
+// emplacement, elle prime sur l'icône lucide : rendu <img> avec la
+// MÊME classe de taille (l'image est déjà redimensionnée à 128×128
+// côté client → nette sur écrans Retina, quelques Ko).
+function HeaderLogo({ ready }: { ready: boolean }) {
+  const theme = getTheme()
+  const custom = ready ? customIconUrl('logo', theme) : null
+  if (custom) return <img src={custom} alt="" className="h-5 w-5 object-contain" aria-hidden />
+  const name = ready ? theme.icons?.logo : undefined
+  const Icon = (name && LOGO_ICONS[name]) || GraduationCap
+  return <Icon className="h-5 w-5" />
+}
+
+function CardIcon({ kind }: { kind: 'teacher' | 'student' }) {
+  const theme = getTheme()
+  const custom = customIconUrl(kind, theme)
+  if (custom) return <img src={custom} alt="" className="h-6 w-6 object-contain" aria-hidden />
+  if (kind === 'teacher') {
+    const name = theme.icons?.teacher
+    const Icon = (name && TEACHER_ICONS[name]) || GraduationCap
+    return <Icon className="h-6 w-6" />
+  }
+  const name = theme.icons?.student
+  const Icon = (name && STUDENT_ICONS[name]) || Users
+  return <Icon className="h-6 w-6" />
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { extractToken } from '@/lib/tbl'
+import { bumpRevisions } from '@/lib/revision'
 
 // POST /api/alert — v2.5.0 : signalement anti-capture envoyé par la vue
 // étudiant (silencieux côté étudiant : jamais d'erreur affichée).
@@ -48,7 +49,11 @@ export async function POST(req: NextRequest) {
 
     const student = await db.student.findUnique({
       where: { token },
-      select: { id: true, sessionId: true, session: { select: { deletedAt: true } } },
+      select: {
+        id: true,
+        sessionId: true,
+        session: { select: { deletedAt: true, reportsEnabled: true } },
+      },
     })
     if (!student) {
       return NextResponse.json({ error: 'Connexion perdue.' }, { status: 404 })
@@ -57,6 +62,16 @@ export async function POST(req: NextRequest) {
     // façon bloqué, mais évitons d'écrire dans une séance archivée).
     if (student.session.deletedAt) {
       return NextResponse.json({ error: 'Séance supprimée.' }, { status: 410 })
+    }
+
+    // v3.0.0 — Signalements DÉSACTIVÉS pour cette séance (choix de
+    // l'administrateur, TBL par TBL — désactivés par défaut) : on ne
+    // répond « ok » SANS RIEN ÉCRIRE (l'app étudiante, informée par
+    // son état, ne devrait de toute façon plus envoyer de signale-
+    // ment : ce contrôle protège les versions antérieures ouvertes
+    // et garantit zéro écriture, zéro requête inutile).
+    if (student.session.reportsEnabled !== true) {
+      return NextResponse.json({ ok: true, disabled: true })
     }
 
     // Déduplication : dernier signalement du même type il y a moins d'une minute ?
@@ -70,6 +85,11 @@ export async function POST(req: NextRequest) {
     }
 
     await db.alertEvent.create({ data: { studentId: student.id, kind, phase } })
+    // v2.9.0 : le signalement intéresse UNIQUEMENT le tableau de bord
+    // enseignant → compteur enseignant + 1 seulement : les 65 étudiants
+    // ne rechargent PAS leur état pour un signalement qui ne les
+    // concerne pas (c'est la moitié de la fluidité en grande classe).
+    await bumpRevisions(student.sessionId, { student: false })
     return NextResponse.json({ ok: true })
   } catch (e) {
     console.error('POST /api/alert', e)

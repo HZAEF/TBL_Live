@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
-import { Clock, KeyRound, LogOut, Trophy, Users } from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
+import { Clock, KeyRound, LogOut, Trophy, UserRoundPen, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,12 +14,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { api, removeStudentSession, usePoll } from '@/lib/tbl-client'
+import { api, removeStudentSession, saveStudentSession, useNetworkStatus, usePoll, useSubmitState } from '@/lib/tbl-client'
 import { PHASE_INFO, type StudentStateDTO, type SaiItemDTO } from '@/lib/tbl-types'
 import { useI18n } from '@/lib/i18n'
 import { fmtNote } from '@/lib/grades'
+import { noteServerNow } from '@/lib/server-clock'
 import { SAI_SUBSCALES, SAI_SUBSCALE_INFO, SAI_LIKERT_KEYS, saiItemText } from '@/lib/sai'
-import { ChoiceButton, choiceLetter, InfoCard, PhaseBadge } from './shared'
+import { ChoiceButton, choiceLetter, ElapsedSince, InfoCard, NetworkPill, PhaseBadge, SubmitStatus } from './shared'
 import { IratQuiz, TratQuiz, AppealView, ApplicationView, PeerView } from './student-quizzes'
 import { AntiCapture } from './anti-capture'
 import { Textarea } from '@/components/ui/textarea'
@@ -32,19 +34,124 @@ export function StudentSession({
   onLeave: () => void
   onExit: () => void
 }) {
+  // v3.0.0 — SONDAGE EN DEUX TEMPS (la fluidité à 150 étudiants) :
+  //  1. chaque cycle interroge /api/student/revision : UNE requête
+  //     en base, une réponse de quelques octets (numéros de révision
+  //     + heure serveur). Tant que les numéros sont identiques, l'ANCIEN
+  //     objet est renvoyé tel quel — même référence React → aucun
+  //     re-rendu, aucune lecture lourde ;
+  //  2. dès qu'un numéro change (phase tournée, réponse de SON équipe,
+  //     révélation…), l'état complet est demandé — avec un petit délai
+  //     aléatoire (0-600 ms) qui étale la classe : 150 étudiants ne
+  //     partent pas tous dans la même milliseconde.
+  //  3. refresh(force=true) après une SOUMISSION : l'état complet est
+  //     repris SANS condition — la propre réponse de l'étudiant est
+  //     visible immédiatement, sans incrémenter les compteurs des
+  //     autres (une réponse iRAT n'intéresse que son auteur et le
+  //     tableau de bord).
+  const lastStateRef = useRef<StudentStateDTO | null>(null)
+  const fetchState = useCallback(async (force = false) => {
+    const last = lastStateRef.current
+    if (!force && last) {
+      const light = await api<{
+        revision: number
+        teamRevision: number | null
+        serverNow?: string
+      }>('/api/student/revision', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      // L'heure serveur corrige l'horloge de l'appareil — tous les
+      // minuteurs (iRAT, durée de phase) restent synchronisés.
+      noteServerNow(light.serverNow)
+      if (
+        light.revision === last.revision &&
+        light.teamRevision === (last.teamRevision ?? null)
+      ) {
+        return last
+      }
+      // Quelque chose a changé : léger étalement de la classe.
+      await new Promise((r) => setTimeout(r, Math.random() * 600))
+    }
+    const url =
+      !force && last
+        ? `/api/student?rev=${last.revision}&trev=${last.teamRevision ?? 'null'}`
+        : '/api/student'
+    const d = await api<StudentStateDTO | { unchanged: true; revision: number; serverNow?: string }>(
+      url,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+    noteServerNow(d.serverNow)
+    if ((d as { unchanged?: boolean }).unchanged === true) {
+      return lastStateRef.current as StudentStateDTO
+    }
+    lastStateRef.current = d as StudentStateDTO
+    return d as StudentStateDTO
+  }, [token])
   const { data, error, loading, refresh } = usePoll<StudentStateDTO>(
-    // v2.4.0 : jeton dans l'en-tête Authorization (hors des journaux serveur).
-    () => api<StudentStateDTO>('/api/student', { headers: { Authorization: `Bearer ${token}` } }),
-    // Sondage adaptatif : 2,5 s pendant les phases où les étudiants
-    // répondent (iRAT, tRAT, application), 5 s pendant les phases d'attente
-    // (accueil, réclamations, feedback, pairs, fin) — divise environ par
-    // deux la charge sur la base Neon pour une grande classe, sans perte
-    // de réactivité là où elle compte.
-    (d) => (d && ['irat', 'trat', 'application'].includes(d.session.status) ? 2500 : 5000)
+    fetchState,
+    // Sondage adaptatif : 2 s pendant les phases où les étudiants
+    // répondent (iRAT, tRAT, application — chaque cycle ne coûte plus
+    // qu'une ligne de base), 5 s pendant les phases d'attente (accueil,
+    // réclamations, feedback, pairs, fin). Page cachée = pause totale
+    // (v3.0.0) : 150 téléphones éteints ne consomment plus rien.
+    (d) => (d && ['irat', 'trat', 'application'].includes(d.session.status) ? 2000 : 5000)
   )
   const [confirmLeave, setConfirmLeave] = useState(false)
   const [showCode, setShowCode] = useState(false)
   const { t } = useI18n()
+  // v3.4.0 — ÉDITION NOM/ÉQUIPE pendant l'attente (demande de
+  // l'enseignante) : deux boutons à côté de « Quitter », uniquement en
+  // phase lobby — dès que le iRAT commence, le serveur REFUSE toute
+  // modification (409) et les boutons disparaissent.
+  const [editName, setEditName] = useState(false)
+  const [editTeam, setEditTeam] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
+  const [teamDraft, setTeamDraft] = useState<string | null>(null)
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [profileError, setProfileError] = useState('')
+  // v3.1.0 — ÉTAT RÉSEAU (problème n°12) : pastille discrète dans
+  // l'en-tête — Hors ligne / Reconnexion… / Connexion lente — pilotée
+  // par les échecs du sondage + les événements online/offline du
+  // navigateur. Invisible quand tout va bien : zéro bruit visuel.
+  const network = useNetworkStatus(error)
+
+  // v3.4.0 — Enregistre la correction nom/équipe (POST /api/student,
+  // action update_profile) : rafraîchit l'état (le serveur a incrémenté
+  // les compteurs — tous les écrans concernés suivent) et met à jour la
+  // sauvegarde locale (écran de reprise automatique).
+  const saveProfile = useCallback(
+    async (payload: { name?: string; teamId?: string }) => {
+      if (!data || savingProfile) return
+      setSavingProfile(true)
+      setProfileError('')
+      try {
+        const res = await api<{ ok: boolean; name: string; teamId: string | null }>(
+          '/api/student',
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ action: 'update_profile', ...payload }),
+          }
+        )
+        saveStudentSession({
+          code: data.session.code,
+          token,
+          name: res.name,
+          teamName:
+            (data.teams ?? []).find((tm) => tm.id === res.teamId)?.name ?? undefined,
+          savedAt: Date.now(),
+        })
+        setEditName(false)
+        setEditTeam(false)
+        await refresh()
+      } catch (e) {
+        setProfileError(e instanceof Error ? e.message : t('Erreur inconnue.'))
+      } finally {
+        setSavingProfile(false)
+      }
+    },
+    [data, refresh, savingProfile, t, token]
+  )
 
   if (loading && !data) {
     return (
@@ -108,6 +215,10 @@ export function StudentSession({
       // v2.5.1 : épreuve en cours transmise avec chaque signalement, pour
       // l'affichage « par épreuve » dans l'onglet Signalements enseignant.
       phase={status}
+      // v3.0.0 : signalements activés pour cette séance ? (l'adminis-
+      // trateur les réactive TBL par TBL — désactivés par défaut :
+      // aucune requête ne part, le filigrane et le flou restent actifs).
+      reportsEnabled={data.session.reportsEnabled === true}
     >
       <div className="mx-auto max-w-2xl space-y-4">
         {/* En-tête */}
@@ -120,17 +231,57 @@ export function StudentSession({
             <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-stone-500">
               <PhaseBadge phase={status} />
               <span>{t(PHASE_INFO[status].label)}</span>
+              {/* v3.1.0 — état réseau : visible SEULEMENT en cas de
+                  problème (sinon aucune pastille, aucun bruit). */}
+              <NetworkPill quality={network.quality} />
             </p>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="shrink-0 text-stone-400 hover:bg-red-50 hover:text-red-600"
-            onClick={() => setConfirmLeave(true)}
-          >
-            <LogOut className="mr-1 h-4 w-4 rtl:rotate-180" />
-            {t('Quitter')}
-          </Button>
+          <div className="flex shrink-0 items-center gap-0.5">
+            {/* v3.4.0 — correction nom/équipe pendant l'attente (uniquement
+                en phase lobby : dès que le iRAT commence, plus rien ne
+                bouge — les réponses sont figées). */}
+            {status === 'lobby' && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-stone-500 hover:bg-emerald-50 hover:text-emerald-700"
+                  title={t('Corriger mon nom')}
+                  onClick={() => {
+                    setNameDraft(data.me.name)
+                    setProfileError('')
+                    setEditName(true)
+                  }}
+                >
+                  <UserRoundPen className="mr-1 h-4 w-4" />
+                  {t('Nom')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-stone-500 hover:bg-emerald-50 hover:text-emerald-700"
+                  title={t('Changer d’équipe')}
+                  onClick={() => {
+                    setTeamDraft(data.me.team?.id ?? null)
+                    setProfileError('')
+                    setEditTeam(true)
+                  }}
+                >
+                  <Users className="mr-1 h-4 w-4" />
+                  {t('Équipe')}
+                </Button>
+              </>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="shrink-0 text-stone-400 hover:bg-red-50 hover:text-red-600"
+              onClick={() => setConfirmLeave(true)}
+            >
+              <LogOut className="mr-1 h-4 w-4 rtl:rotate-180" />
+              {t('Quitter')}
+            </Button>
+          </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           <span className="rounded-full bg-stone-100 px-2.5 py-1 font-semibold text-stone-700">
@@ -150,13 +301,21 @@ export function StudentSession({
               type="button"
               onClick={() => setShowCode(true)}
               className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-800 transition-colors hover:bg-amber-200"
-              title={t('Voir mon code personnel')}
+              title={t('Voir mon mot de passe')}
             >
               <KeyRound className="h-3 w-3" />
-              {t('code')}
+              {t('Mot de passe')}
             </button>
           )}
         </div>
+        {/* v2.9.0 — Durée de la phase (chronomètre ASCENDANT, côté
+            étudiant comme côté enseignant) : chaque phase déroule son
+            propre minute. Pendant l'iRAT, le compte à rebours descendant
+            reste affiché dans le bandeau du test ci-dessous. */}
+        <p className="mt-2 flex items-center gap-1.5 text-xs text-stone-500">
+          <Clock className="h-3.5 w-3.5 text-stone-400" />
+          {t('Durée de la phase :')} <ElapsedSince startedAt={data.session.phaseStartedAt} />
+        </p>
       </div>
 
       {/* Contenu selon la phase */}
@@ -177,16 +336,18 @@ export function StudentSession({
         {status === 'peer' && <PeerView data={data} refresh={refresh} token={token} />}
         {status === 'finished' && <FinishedView data={data} token={token} refresh={refresh} onExit={onExit} />}
 
-      {/* Mon code de reprise */}
+      {/* Mon mot de passe (v3.4.0 : « code personnel » devient « mot de
+          passe » — le mot « code » prêtait à confusion avec le code de la
+          SÉANCE à 6 caractères, affiché juste à côté). */}
       <AlertDialog open={showCode} onOpenChange={setShowCode}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t('Mon code personnel')}</AlertDialogTitle>
+            <AlertDialogTitle>{t('Mon mot de passe')}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
                   {t(
-                    'Pour retrouver votre séance sur un autre appareil (ou après une perte de connexion), il vous faut : le code de la séance, votre nom, et ce code personnel.'
+                    'Pour retrouver votre séance sur un autre appareil (ou après une perte de connexion), il vous faut : le code de la séance, votre nom, et ce mot de passe.'
                   )}
                 </p>
                 <p className="select-all rounded-xl bg-stone-900 px-4 py-3 text-center font-mono text-2xl font-bold tracking-[0.35em] text-emerald-300">
@@ -215,7 +376,7 @@ export function StudentSession({
             <AlertDialogTitle>{t('Quitter cette séance ?')}</AlertDialogTitle>
             <AlertDialogDescription>
               {t(
-                'Vos réponses déjà envoyées sont conservées. Vous pourrez revenir avec le même nom, le code de la séance et votre code personnel. (Vous pouvez aussi rester connecté et simplement retourner à l’accueil.)'
+                'Vos réponses déjà envoyées sont conservées. Vous pourrez revenir avec le même nom, le code de la séance et votre mot de passe. (Vous pouvez aussi rester connecté et simplement retourner à l’accueil.)'
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -228,6 +389,113 @@ export function StudentSession({
               }}
             >
               {t('Oui, me déconnecter')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v3.4.0 — CORRECTION DU NOM (uniquement en attente, avant le
+          iRAT). Validation locale + homonymes vérifiés par le serveur. */}
+      <AlertDialog open={editName} onOpenChange={setEditName}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Corriger mon nom')}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>
+                  {t(
+                    'Une faute de frappe ? Corrigez-le maintenant : une fois le test iRAT commencé, votre nom ne pourra plus être modifié.'
+                  )}
+                </p>
+                <Input
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  maxLength={40}
+                  className="h-12 text-base"
+                  autoCapitalize="words"
+                  aria-label={t('Mon nom')}
+                />
+                {profileError && (
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {profileError}
+                  </p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('Annuler')}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={savingProfile || nameDraft.trim().length < 2}
+              onClick={(e) => {
+                e.preventDefault()
+                void saveProfile({ name: nameDraft.trim() })
+              }}
+            >
+              {savingProfile ? t('Enregistrement…') : t('Enregistrer')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v3.4.0 — CHANGEMENT D'ÉQUIPE (uniquement en attente). Liste de
+          boutons tactile (pas de menu déroulant dans une fenêtre modale)
+          avec l'équipe actuelle surlignée. */}
+      <AlertDialog open={editTeam} onOpenChange={setEditTeam}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Changer d’équipe')}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                <p>
+                  {t(
+                    'Mauvaise équipe ? Choisissez-en une autre : une fois le test iRAT commencé, votre équipe ne pourra plus être modifiée.'
+                  )}
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label={t('Mon équipe')}
+                  className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto"
+                >
+                  {(data.teams ?? []).map((tm) => {
+                    const selected = teamDraft === tm.id
+                    return (
+                      <button
+                        key={tm.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setTeamDraft(tm.id)}
+                        className={
+                          'flex h-11 items-center justify-center rounded-xl border-2 text-sm font-bold transition-all active:scale-95 ' +
+                          (selected
+                            ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm'
+                            : 'border-stone-200 bg-white text-stone-600 hover:border-emerald-300 hover:bg-emerald-50')
+                        }
+                      >
+                        {tm.name}
+                      </button>
+                    )
+                  })}
+                </div>
+                {profileError && (
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {profileError}
+                  </p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('Annuler')}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={savingProfile || !teamDraft || teamDraft === data.me.team?.id}
+              onClick={(e) => {
+                e.preventDefault()
+                if (teamDraft) void saveProfile({ teamId: teamDraft })
+              }}
+            >
+              {savingProfile ? t('Enregistrement…') : t('Rejoindre cette équipe')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -252,6 +520,13 @@ function LobbyView({ data }: { data: StudentStateDTO }) {
         </p>
         <p className="mt-1 text-sm text-stone-600">
           {t(PHASE_INFO.lobby.studentHint)} {t('Cet écran se mettra à jour automatiquement.')}
+        </p>
+        {/* v3.4.0 — rappel : les boutons « Nom » et « Équipe » en haut de
+            l'écran permettent de corriger une erreur D'AVANT le démarrage. */}
+        <p className="mt-2 rounded-lg bg-stone-100 px-3 py-2 text-xs text-stone-600">
+          {t(
+            'Mauvaise équipe ou faute dans votre nom ? Utilisez les boutons « Nom » et « Équipe » en haut de l’écran, tant que la séance n’a pas commencé.'
+          )}
         </p>
         {data.me.team && (
           <div className="mt-4 rounded-xl bg-emerald-50 p-4">
@@ -428,21 +703,38 @@ function SaiQuestionnaire({
   const [answers, setAnswers] = useState<Record<string, number>>({})
   const [comment, setComment] = useState('')
   const [error, setError] = useState('')
-  const [sending, setSending] = useState(false)
+  // v3.4.0 — AVERTISSEMENT « réponses Likert uniformes » (demande de
+  // l'enseignante) : quelques étudiants cochent 5 (ou 1) partout sans
+  // lire. Si TOUTES les réponses sont identiques (5 items ou plus),
+  // une fenêtre de confirmation s'affiche avant l'envoi.
+  const [warnUniform, setWarnUniform] = useState(false)
+  // v3.1.0 — état d'envoi explicite + réessai : idempotent côté serveur
+  // (saiCompletedAt + contrainte unique par item : un renvoi après
+  // timeout retombe dans la branche « déjà complété » → même résultat).
+  const submitState = useSubmitState()
+  const sending = submitState.phase.state === 'sending'
 
   const answered = Object.keys(answers).length
   // Questionnaire sans items (séance personnalisée) : envoi direct.
   const allAnswered = answered === items.length
 
-  const submit = async () => {
+  const submit = async (force = false) => {
     if (!allAnswered || sending) {
       setError(t('Répondez à toutes les questions pour continuer.'))
       return
     }
+    // v3.4.0 — toutes les réponses identiques (5/5… 1/1…) : relire avant
+    // d'envoyer (le questionnaire fait partie de la séance sérieuse).
+    if (!force && items.length >= 5) {
+      const values = items.map((it) => answers[it.id])
+      if (values.every((v) => v === values[0])) {
+        setWarnUniform(true)
+        return
+      }
+    }
     setError('')
-    setSending(true)
-    try {
-      await api('/api/sai', {
+    const result = await submitState.run(() =>
+      api<{ ok: boolean }>('/api/sai', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -450,10 +742,9 @@ function SaiQuestionnaire({
           comment: comment.trim() || undefined,
         }),
       })
+    )
+    if (result !== null) {
       await refresh()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('Erreur inconnue.'))
-      setSending(false)
     }
   }
 
@@ -539,13 +830,16 @@ function SaiQuestionnaire({
         <p className="text-center text-sm font-semibold text-stone-600">
           {t('{n} / {total} réponses', { n: answered, total: items.length })}
         </p>
-        {error && (
+        {error && submitState.phase.state !== 'failed' && (
           <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {error}
           </p>
         )}
+        {submitState.phase.state !== 'idle' && (
+          <SubmitStatus phase={submitState.phase} onRetry={() => submit()} />
+        )}
         <Button
-          onClick={submit}
+          onClick={() => submit()}
           disabled={sending || answered < items.length}
           className="h-12 w-full bg-emerald-600 text-base hover:bg-emerald-700"
         >
@@ -557,6 +851,35 @@ function SaiQuestionnaire({
           </p>
         )}
       </div>
+
+      {/* v3.4.0 — AVERTISSEMENT « réponses identiques » (5 partout ou
+          1 partout) : relire AVANT l'envoi, confirmation explicite. */}
+      <AlertDialog open={warnUniform} onOpenChange={setWarnUniform}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('Même réponse à toutes les affirmations')}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(
+                'Vous avez coché la même case pour l’ensemble du questionnaire. Il n’y a ni bonnes ni mauvaises réponses, mais des réponses identiques partout donnent un résultat peu utile : prenez le temps de relire chaque affirmation. Souhaitez-vous envoyer tel quel ?'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction className="bg-emerald-600 hover:bg-emerald-700">
+              {t('Relire mes réponses')}
+            </AlertDialogAction>
+            <AlertDialogAction
+              className="bg-stone-200 text-stone-700 hover:bg-stone-300"
+              onClick={() => {
+                setWarnUniform(false)
+                void submit(true)
+              }}
+            >
+              {t('Envoyer quand même')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Button
         variant="outline"

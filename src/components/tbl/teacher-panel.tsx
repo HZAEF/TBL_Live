@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Plus,
   LogIn,
@@ -12,6 +12,8 @@ import {
   RotateCcw,
   Upload,
   Loader2,
+  Globe,
+  MonitorSmartphone,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -26,9 +28,15 @@ import {
 } from '@/lib/tbl-client'
 import { exampleContent, emptyQuestion, emptyCase, QuestionEditor } from './question-editor'
 import { TeacherDashboard } from './teacher-dashboard'
+import {
+  TeacherAccountBar,
+  TeacherLoginGate,
+  useTeacherAuth,
+} from './teacher-account'
 import { suggestPin, type DraftCase, type DraftQuestion } from '@/lib/tbl-types'
+import { PHASE_INFO, type Phase } from '@/lib/tbl-types'
 import { DEFAULT_SAI_ITEMS, SAI_SUBSCALES, SAI_SUBSCALE_INFO, type SaiSubscale } from '@/lib/sai'
-import { t, useI18n } from '@/lib/i18n'
+import { formatDate, t, useI18n } from '@/lib/i18n'
 import { useToast } from '@/hooks/use-toast'
 
 type View = 'menu' | 'create' | 'login' | 'upload' | 'dashboard'
@@ -37,8 +45,15 @@ export function TeacherPanel({ onExit }: { onExit: () => void }) {
   const [view, setView] = useState<View>('menu')
   const [session, setSession] = useState<{ code: string; token: string } | null>(null)
   const [loginCode, setLoginCode] = useState('')
+  // v3.1.0 — code en cours d'ouverture depuis la liste « Mes séances »
+  // (désactive le bouton pendant la récupération du jeton).
+  const [openingCode, setOpeningCode] = useState<string | null>(null)
   const { toast } = useToast()
   const { t } = useI18n()
+  // v3.0.0 — connexion OBLIGATOIRE du compte enseignant : sans compte,
+  // impossible de créer, reprendre ou téléverser une séance (les
+  // comptes sont créés par l'administrateur dans /admin → Comptes).
+  const { checking, teacher, setTeacher } = useTeacherAuth()
 
   const openDashboard = (code: string, token: string, title?: string) => {
     saveTeacherSession({ code, token, title: title || 'Séance', savedAt: Date.now() })
@@ -66,8 +81,24 @@ export function TeacherPanel({ onExit }: { onExit: () => void }) {
     )
   }
 
+  // Porte de connexion : tant que le compte enseignant n'est pas
+  // connecté, l'espace enseignant se limite à l'écran de connexion.
+  if (checking) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-emerald-200 border-t-emerald-600" />
+      </div>
+    )
+  }
+  if (!teacher) {
+    return <TeacherLoginGate onLoggedIn={setTeacher} />
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-4">
+      {/* v3.0.0 — barre du compte : prénom/nom, changement de mot de
+          passe, déconnexion. */}
+      <TeacherAccountBar teacher={teacher} onLoggedOut={() => setTeacher(null)} />
       {view === 'menu' && (
         <TeacherMenu
           onExit={onExit}
@@ -77,6 +108,40 @@ export function TeacherPanel({ onExit }: { onExit: () => void }) {
           onOpen={(code) => {
             const saved = getTeacherSessions()[code]
             if (saved) openDashboard(saved.code, saved.token, saved.title)
+          }}
+          openingCode={openingCode}
+          onOpenRemote={(code) => {
+            // v3.1.0 — séance du COMPTE : le jeton du tableau de bord est
+            // récupéré depuis le serveur (open_session) — la séance s'ouvre
+            // depuis N'IMPORTE QUEL appareil connecté au même compte.
+            // Si le serveur refuse (séance disparue, corbeille), repli
+            // propre vers l'écran PIN avec le code pré-rempli.
+            setOpeningCode(code)
+            void (async () => {
+              try {
+                const res = await api<{ code: string; title: string; token: string }>(
+                  '/api/teacher-auth',
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({ action: 'open_session', code }),
+                  }
+                )
+                setOpeningCode(null)
+                openDashboard(res.code, res.token, res.title)
+              } catch (e) {
+                setOpeningCode(null)
+                toast({
+                  title: t('Séance inaccessible'),
+                  description:
+                    e instanceof Error
+                      ? e.message
+                      : t('Reconnectez-vous avec son code et votre PIN.'),
+                  variant: 'destructive',
+                })
+                setLoginCode(code)
+                setView('login')
+              }
+            })()
           }}
         />
       )}
@@ -116,21 +181,67 @@ export function TeacherPanel({ onExit }: { onExit: () => void }) {
 
 // ---------------- Menu enseignant ----------------
 
+/** v3.1.0 — Une séance de la liste « Mes séances » (côté serveur,
+ *  rattachée au compte de l'enseignant — disponible sur tous ses
+ *  appareils). v3.2.0 : role = « owner » (ma séance) ou
+ *  « collaborator » (partagée AVEC moi par un collègue). */
+interface RemoteSession {
+  code: string
+  title: string
+  status: Phase
+  students: number
+  phaseStartedAt: string
+  createdAt: string
+  syncedAt: string | null
+  role?: 'owner' | 'collaborator'
+}
+
 function TeacherMenu({
   onCreate,
   onLogin,
   onUpload,
   onOpen,
+  onOpenRemote,
+  openingCode,
   onExit,
 }: {
   onCreate: () => void
   onLogin: () => void
   onUpload: () => void
   onOpen: (code: string) => void
+  onOpenRemote: (code: string) => void
+  openingCode: string | null
   onExit: () => void
 }) {
   const saved = Object.values(getTeacherSessions()).sort((a, b) => b.savedAt - a.savedAt)
   const { t } = useI18n()
+  // v3.1.0 — « MES SÉANCES » DU COMPTE (demande de l'enseignante) :
+  // la liste vient du SERVEUR (séances rattachées au compte, hors
+  // corbeille) → visibles sur N'IMPORTE QUEL appareil où l'enseignant
+  // se connecte. Les séances mémorisées LOCALEMENT (jeton PIN stocké
+  // sur cet appareil — séances importées par synchronisation ou créées
+  // avant les comptes, sans rattachement au compte) restent visibles
+  // dessous, dans une section « sur cet appareil » : rien ne disparaît,
+  // l'ancien comportement reste un repli.
+  const [remote, setRemote] = useState<RemoteSession[] | null>(null)
+  const reloadKey = useRef(0)
+  useEffect(() => {
+    const myKey = ++reloadKey.current
+    void (async () => {
+      try {
+        const res = await api<{ sessions: RemoteSession[] }>('/api/teacher-auth', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'list_sessions' }),
+        })
+        if (myKey === reloadKey.current) setRemote(res.sessions)
+      } catch {
+        if (myKey === reloadKey.current) setRemote([])
+      }
+    })()
+  }, [])
+  const remoteCodes = new Set((remote ?? []).map((s) => s.code))
+  const localOnly = saved.filter((s) => !remoteCodes.has(s.code))
+
   return (
     <div className="space-y-4">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -185,11 +296,51 @@ function TeacherMenu({
         </button>
       </div>
 
-      {saved.length > 0 && (
-        <div className="rounded-2xl border border-stone-200 bg-white p-4">
-          <p className="mb-3 text-sm font-bold text-stone-800">{t('Mes séances sur cet appareil')}</p>
+      {/* v3.1.0 — MES SÉANCES (du compte, tous appareils) */}
+      <div className="rounded-2xl border border-stone-200 bg-white p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-bold text-stone-800">{t('Mes séances')}</p>
+            <p className="mt-0.5 flex items-center gap-1 text-xs text-stone-500">
+              <MonitorSmartphone className="h-3.5 w-3.5 shrink-0" />
+              {t('Rattachées à votre compte — disponibles sur tous vos appareils, même un autre ordinateur ou téléphone.')}
+            </p>
+          </div>
+        </div>
+        {remote === null ? (
+          <div className="flex h-16 items-center justify-center gap-2 text-sm text-stone-400">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            {t('Chargement de vos séances…')}
+          </div>
+        ) : remote.length === 0 ? (
+          <p className="rounded-xl bg-stone-50 px-3 py-4 text-sm leading-relaxed text-stone-500">
+            {t('Aucune séance sur votre compte pour l’instant. Créez votre première séance — elle sera ensuite disponible ici, sur tous vos appareils.')}
+          </p>
+        ) : (
           <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
-            {saved.map((s) => (
+            {remote.map((s) => (
+              <RemoteSessionRow
+                key={s.code}
+                session={s}
+                opening={openingCode === s.code}
+                onOpen={() => onOpenRemote(s.code)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Repli local : séances de CET appareil absentes de la liste du
+          compte (importées par synchronisation, créées avant les
+          comptes, ou PIN mémorisé ailleurs). Comportement v2.x intact. */}
+      {localOnly.length > 0 && (
+        <div className="rounded-2xl border border-stone-200 bg-white p-4">
+          <p className="mb-3 flex items-center gap-1.5 text-sm font-bold text-stone-800">
+            <Globe className="h-4 w-4 text-stone-400" />
+            {t('Autres séances (sur cet appareil)')}
+          </p>
+          <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+            {localOnly.map((s) => (
               <SavedSessionRow key={s.code} session={s} onOpen={() => onOpen(s.code)} />
             ))}
           </div>
@@ -202,6 +353,72 @@ function TeacherMenu({
       <Button variant="ghost" onClick={onExit} className="text-stone-500">
         {t('Retour à l’accueil')}
       </Button>
+    </div>
+  )
+}
+
+/** Ligne d'une séance du compte : titre, code, phase en cours (badge),
+ *  nombre d'étudiants, dernière activité. */
+function RemoteSessionRow({
+  session,
+  opening,
+  onOpen,
+}: {
+  session: RemoteSession
+  opening: boolean
+  onOpen: () => void
+}) {
+  const { t } = useI18n()
+  const phase = PHASE_INFO[session.status]
+  const finished = session.status === 'finished'
+  const shared = session.role === 'collaborator'
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-xl border border-stone-200 px-3 py-2.5 hover:bg-stone-50">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <p className="truncate text-sm font-semibold text-stone-800">{session.title}</p>
+          {shared && (
+            <span
+              className="shrink-0 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-700"
+              title={t('Séance partagée par un collègue — vous la co-animez avec le même tableau de bord.')}
+            >
+              {t('Partagée')}
+            </span>
+          )}
+          {finished ? (
+            <span className="shrink-0 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-semibold text-stone-500">
+              {t('Terminée')}
+            </span>
+          ) : (
+            <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+              {phase ? t(phase.short) : session.status}
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 truncate font-mono text-xs tracking-wider text-stone-500">
+          {session.code}
+          <span className="ml-2 font-sans tracking-normal">
+            · {t('{n} étudiants', { n: session.students })} ·{' '}
+            {formatDate(new Date(session.phaseStartedAt), {
+              day: 'numeric',
+              month: 'short',
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </span>
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          size="sm"
+          className="h-9 bg-emerald-600 hover:bg-emerald-700"
+          disabled={opening}
+          onClick={onOpen}
+        >
+          {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : t('Ouvrir')}
+          <ChevronRight className="ml-0.5 h-4 w-4 rtl:rotate-180" />
+        </Button>
+      </div>
     </div>
   )
 }
