@@ -50,6 +50,39 @@ model Session {
   // les étudiants (noms, réponses, réclamations, évaluations par les pairs)
   // sont effacées — la séance (QCM, cas cliniques, réglages) est conservée.
   dataPurgedAt   DateTime?
+  // v2.9.0 — Sondage allégé pour les grandes classes. Chaque écriture qui
+  // change ce que voient les ÉTUDIANTS (phase, question, réponse, équipe,
+  // révélation…) incrémente « revision » : un étudiant qui renvoie son
+  // dernier numéro reçoit une réponse minuscule « rien n'a changé » au
+  // lieu de l'état complet. Divise la charge de la base quand rien ne
+  // bouge (65 étudiants = 65 réponses légères au lieu de 65 états
+  // complets à chaque cycle).
+  revision       Int      @default(0)
+  // v2.9.0 — Même principe pour le tableau de bord ENSEIGNANT : compteur
+  // séparé, incrémenté AUSSI par les signalements anti-capture (visibles
+  // par l'enseignant, sans intérêt pour les étudiants → pas de « revision »).
+  revisionTeacher Int     @default(0)
+  // v3.0.0 — Compte enseignant propriétaire de la séance (null = séance
+  // importée par synchronisation ou créée avant la v3.0 : aucune perte,
+  // la séance reste pilotable par code + PIN). Colonne additive nullable.
+  teacherId      String?
+  teacher        TeacherAccount? @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+  // v3.0.0 — Signalements anti-capture : DÉSACTIVÉS par défaut (la
+  // professeure ne les juge plus pertinents) ; l'administrateur peut les
+  // réactiver TBL par TBL depuis /admin. Quand ils sont désactivés :
+  // rien n'est envoyé depuis les téléphones, rien n'est écrit en base,
+  // l'onglet « Signalements » disparaît du tableau de bord et la requête
+  // des événements n'est plus exécutée — la séance reste légère même
+  // avec 150 étudiants. Colonne additive, défaut false (désactivé).
+  reportsEnabled Boolean  @default(false)
+  // v3.1.0 — Journal d'événements (préparation de la synchronisation
+  // delta hybride) : numéro du DERNIER événement consigné pour la
+  // séance. Chaque mutation importante (réponse, join, changement de
+  // phase, révélation…) ajoute UNE ligne SessionEvent numérotée —
+  // un futur sync pourra demander « les événements après le curseur N »
+  // au lieu de transporter le snapshot complet. Colonne additive,
+  // défaut 0 (les séances existantes démarrent simplement à zéro).
+  eventSeq       Int      @default(0)
   createdAt     DateTime @default(now())
 
   teams    Team[]
@@ -60,6 +93,161 @@ model Session {
   peerEvals PeerEval[]
   // v2.6.0 : questionnaire de fin de séance (TBL-SAI) propre à la séance
   saiItems  SaiItem[]
+  // v3.2.0 — Partage de la séance avec d'autres enseignants : emails
+  // institutionnels ajoutés par le propriétaire (ou un gestionnaire du
+  // tableau de bord) depuis l'onglet Configurations. Chaque enseignant
+  // listé retrouve la séance dans « Mes séances » de son compte et peut
+  // la piloter (ouvrir sans PIN, dashboard complet). L'EMAIL est
+  // l'identifiant stable entre les instances locale et en ligne (les
+  // identifiants de comptes diffèrent des deux côtés) : la liste fait
+  // partie de la sauvegarde/synchronisation. Relation additive pure.
+  collaborators SessionCollaborator[]
+  // v3.1.0 : journal d'événements (synchronisation delta future)
+  events   SessionEvent[]
+}
+
+// ============================================================
+// v3.2.0 — Partage d'une séance TBL entre enseignants
+//
+// Le propriétaire (ou quiconque pilote le tableau de bord — le jeton
+// enseignant contrôle déjà toute la séance) invite des collègues par
+// leur email institutionnel : la séance apparaît alors dans
+// « Mes séances » du compte de chaque collègue, qui peut l'ouvrir
+// SANS PIN et co-piloter le déroulé (même tableau de bord, mêmes
+// actions). Pratique pour une séance TBL animée à plusieurs ou
+// co-signée par deux enseignants.
+//
+// CHOIX TECHNIQUES :
+//  - identifiant = EMAIL (pas l'id du compte) : les comptes sont
+//    propres à chaque instance (locale / en ligne), l'email est le
+//    seul identifiant stable → la liste survit à la synchronisation
+//    Internet ↔ réseau local et aux sauvegardes .json ;
+//  - une ligne par (séance, email) — contrainte unique : ajouter
+//    deux fois le même email est un no-op, jamais un doublon ;
+//  - le compte n'a pas besoin d'exister au moment du partage : si
+//    l'administrateur crée le compte plus tard (même email), la
+//    séance apparaît aussitôt dans « Mes séances » du nouvel compte ;
+//  - suppression d'un compte enseignant : RIEN à nettoyer (aucune
+//    clé étrangère vers le compte) — l'email devient simplement
+//    inactif jusqu'à re-création du compte ;
+//  - les données partagées ne sont PAS des données étudiantes :
+//    la purge des données d'une séance conserve le partage.
+// ============================================================
+model SessionCollaborator {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Email institutionnel (minuscules, normalisé à l'ajout).
+  email     String
+  addedAt   DateTime @default(now())
+
+  // Un partage par séance et par email.
+  @@unique([sessionId, email])
+  // « Quelles séances sont partagées avec cet email ? » (connexion
+  // enseignant → liste « Mes séances ») : index dédié.
+  @@index([email])
+}
+
+// ============================================================
+// v3.1.0 — Journal d'événements d'une séance
+//
+// PRÉPARATION de la synchronisation delta « hybride » : chaque
+// mutation importante ajoute UNE ligne numérotée (sequence monotone
+// propre à la séance, attribuée sous le verrou d'écriture → jamais
+// deux événements avec le même numéro). Un futur mécanisme de
+// synchronisation pourra demander « donne-moi les événements après
+// le curseur X » (action export_events) au lieu de transporter le
+// snapshot complet — le snapshot reste nécessaire pour le backup,
+// la restauration et l'amorçage d'une nouvelle instance.
+//
+// RÈGLES :
+//  - INSERT-ONLY : on n'écrit JAMAIS de mise à jour ni de suppression
+//    (une correction apparaît comme un NOUVEL événement) ;
+//  - AUCUN SECRET dans payload (jamais de jeton, de PIN, de code de
+//    reprise, de mot de passe — uniquement des identifiants techniques
+//    et des valeurs de réponse) ;
+//  - origin : instance qui a produit l'événement ('local' | 'online'),
+//    pour diagnostiquer les allers-retours de la fusion hybride ;
+//  - volume négligeable : ~1 ligne par mutation étudiante (quelques
+//    dizaines d'octets), écrite DANS le verrou d'écriture de la
+//    séance → zéro contention supplémentaire.
+// ============================================================
+model SessionEvent {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Numéro monotone propre à la séance (1, 2, 3…). Attribué en
+  // incrémentant Session.eventSeq SOUS le verrou d'écriture : deux
+  // écritures simultanées ne peuvent pas produire le même numéro.
+  sequence  Int
+  // 'join' | 'answer' | 'team_answer' | 'app_answer' | 'appeal' |
+  // 'appeal_done' | 'peer' | 'sai' | 'phase' | 'case_open' | 'reveal'
+  // | 'finish' | 'appeal_decision'
+  type      String
+  // Identifiant de l'entité concernée (id de la question, de l'étudiant,
+  // de l'équipe, du cas…) — null pour les événements de séance entière.
+  entityId  String?
+  // JSON minimal SANS secret (choix, tentative, phase, textes courts).
+  payload   String   @default("{}")
+  // Instance émettrice : 'local' (le PC de l'enseignant) ou 'online'
+  // (Vercel). Renseigné depuis l'en-tête x-tbl-origin du POST (si
+  // absent : 'local' — le serveur qui traite est l'origine).
+  origin    String   @default("local")
+  createdAt DateTime @default(now())
+
+  // Un numéro par séance, et un seul : garanti même si deux requêtes
+  // concurrentes arrivaient à lire le même eventSeq (sécurité
+  // secondaire, le verrou applicatif tient déjà le terrain).
+  @@unique([sessionId, sequence])
+  @@index([sessionId, createdAt])
+}
+
+// ============================================================
+// v3.0.0 — Comptes enseignants (connexion obligatoire)
+// Seul un compte créé par l'administrateur peut ouvrir des séances
+// TBL (créer, reprendre, téléverser) : plus de séance ouverte par
+// n'importe qui. Connexion par email institutionnel + mot de passe
+// (généré par l'administrateur, modifiable par l'enseignant).
+//  - email : unique, minuscules, domaine institutionnel vérifié
+//    (@famso.u-sousse.tn par défaut, modifiable dans /admin) ;
+//  - passwordHash : bcrypt (comme le PIN et le mot de passe admin) ;
+//  - jeton de session : cookie HttpOnly, SEUL le hash SHA-256 est
+//    stocké en base (12 h), verrouillage 5 essais → 15 minutes ;
+//  - forgotPasswordAt : l'enseignant a signalé un mot de passe
+//    oublié → badge dans l'espace Comptes de l'administrateur, qui
+//    génère un nouveau mot de passe et le lui envoie par email.
+// NB : les comptes sont propres à CHAQUE instance (locale et en
+// ligne) — l'administrateur les recrée où il veut, le mot de passe
+// peut être identique des deux côtés.
+// ============================================================
+model TeacherAccount {
+  id           String    @id @default(cuid())
+  firstName    String
+  lastName     String
+  email        String    @unique
+  passwordHash String
+  loginAttempts Int      @default(0)
+  lockedUntil  DateTime?
+  tokenHash     String?
+  tokenExpiresAt DateTime?
+  // Mot de passe oublié : date de la demande (null = aucune) et date
+  // à laquelle l'administrateur l'a traitée (le badge disparaît).
+  forgotPasswordAt   DateTime?
+  forgotPasswordSeenAt DateTime?
+  // v3.4.0 — AUTHENTIFICATION À DEUX FACTEURS (TOTP, RFC 6238) :
+  // secret en base32 (null = 2FA jamais configurée). La double
+  // authentification est VALIDÉE par l'enseignant lui-même (il
+  // confirme un code de son application d'authentification) —
+  // jusqu'à cette confirmation, la connexion reste en mot de passe
+  // seul. Implémentée mais NON activée : aucune 2FA n'est exigée
+  // tant que l'enseignant n'a pas volontairement terminé son
+  // inscription. Colonne additive nullable → zéro impact sur les
+  // bases existantes.
+  totpSecret   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions Session[]
 }
 
 // Cas clinique d'application : un énoncé + 3 à 5 QCU résolues en équipe.
@@ -89,6 +277,15 @@ model Team {
   session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   name      String // "Équipe 1", ...
   number    Int
+  // v3.0.0 — Compteur de révision PROPRE À L'ÉQUIPE (sondage allégé
+  // par équipe) : une réponse tRAT ne concerne que les membres de
+  // l'équipe (carte à gratter visible par elle seule). Incrémenter
+  // la révision GLOBALE aurait forcé les 150 étudiants de la classe
+  // à re-télécharger l'état complet à CHAQUE réponse d'UNE équipe ;
+  // avec ce compteur, seuls les membres de l'équipe concernée
+  // renouvellent leur état — la tempête de requêtes des grosses
+  // classes disparaît. Colonne additive, défaut 0.
+  revisionTeam Int @default(0)
   // L'équipe a signalé qu'elle n'a (plus) de réclamation : quand toutes les
   // équipes actives ont répondu, la phase passe automatiquement au feedback.
   appealsDone Boolean @default(false)
@@ -315,4 +512,108 @@ model SaiResponse {
   @@unique([studentId, itemId])
 
   @@index([studentId])
+}
+
+// ============================================================
+// v2.9.0 — Espace administrateur de l'application
+// Une seule ligne (id = "singleton") :
+//  - mot de passe administrateur (bcrypt) — vide à l'origine :
+//    la première visite de /admin propose de le choisir ;
+//  - jeton de session (hash SHA-256 + expiration 12 h) posé en
+//    cookie HttpOnly après connexion ;
+//  - verrouillage anti force-brute (5 essais → 15 minutes) ;
+//  - délai de la synchronisation Internet ↔ réseau local (ms) ;
+//  - personnalisations de texte : { "texte d'origine": "texte voulu" }.
+//    Elles s'appliquent dans toutes les langues et restent
+//    modifiables ou réinitialisables à tout moment.
+// ============================================================
+model AdminSetting {
+  id             String    @id @default("singleton")
+  passwordHash   String    @default("")
+  loginAttempts  Int       @default(0)
+  lockedUntil    DateTime?
+  tokenHash      String?
+  tokenExpiresAt DateTime?
+  syncIntervalMs Int       @default(5000)
+  textOverrides  String    @default("{}")
+  // v3.0.0 — Domaine institutionnel des emails enseignants (modifiable
+  // par l'administrateur si l'établissement change de domaine).
+  teacherEmailDomain String @default("@famso.u-sousse.tn")
+  // v3.0.0 — Personnalisation de l'apparence : { primary, accent,
+  // background, logoIcon, teacherIcon, studentIcon } (JSON, couleurs
+  // #hex). "{}" = thème d'origine (vert émeraude).
+  theme          String    @default("{}")
+  // v3.4.0 — AUTHENTIFICATION À DEUX FACTEURS DE L'ADMINISTRATEUR
+  // (TOTP, RFC 6238) : secret en base32 + drapeau d'activation.
+  // Implémentée mais DÉSACTIVÉE par défaut : la connexion adminis-
+  // trateur reste en mot de passe seul tant que l'administrateur
+  // n'a pas volontairement terminé l'inscription (générer le secret
+  // → le saisir dans une application d'authentification →
+  // confirmer un code). Colonnes additives, aucun impact.
+  adminTotpSecret  String? // null = jamais configurée
+  adminTotpEnabled Boolean @default(false)
+  // v3.4.0 — ENVOI AUTOMATIQUE D'EMAILS (récupération du mot de
+  // passe enseignant) : configuration SMTP en JSON
+  // { host, port, username, password, from, starttls? } + drapeau
+  // d'activation. Implémenté mais DÉSACTIVÉ par défaut : tant que
+  // emailEnabled = false, « mot de passe oublié » garde le compor-
+  // tement actuel (badge pour l'administrateur, qui transmet lui-
+  // même le nouveau mot de passe). L'administrateur configure son
+  // serveur SMTP dans l'onglet Sécurité et peut tester l'envoi
+  // avant d'activer. Le mot de passe SMTP reste DANS la base (jamais
+  // renvoyé au navigateur après enregistrement).
+  smtpConfig    String    @default("{}")
+  emailEnabled  Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// ============================================================
+// v3.4.0 — JOURNAL ADMINISTRATEUR des principaux événements
+//
+// L'espace /admin affiche QUI a fait QUOI et QUAND, à l'échelle de
+// TOUTE l'application (le journal du tableau de bord enseignant est,
+// lui, limité à UNE séance) :
+//  - création / suppression / redémarrage / duplication / partage
+//    d'une séance TBL (par qui : compte enseignant ou anonyme) ;
+//  - connexions des comptes enseignants (+ verrouillages) ;
+//  - changements de mots de passe enseignants (par l'enseignant ou
+//    par l'administrateur) ;
+//  - créations / suppressions de comptes, imports de comptes ;
+//  - purges de données (par période ou par sélection) ;
+//  - synchronisations reçues (miroirs locaux ↔ en ligne) ;
+//  - connexions administrateur + changement de son mot de passe.
+//
+// RÈGLES :
+//  - INSERT-ONLY, rotation : les 2000 derniers événements sont
+//    conservés (les plus anciens supprimés par blocs de 100) ;
+//  - AUCUN SECRET dans detail (jamais de mot de passe, de PIN, de
+//    jeton — uniquement libellés, emails et codes de séance) ;
+//  - BEST-EFFORT : un échec d'écriture ne fait JAMAIS échouer
+//    l'action de l'utilisateur (journal = observateur) ;
+//  - table ADDITIVE : une instance dont la base n'a pas encore été
+//    mise à jour fonctionne normalement (journal simplement vide —
+//    les lectures sont tolérantes).
+// ============================================================
+model AdminEvent {
+  id        String   @id @default(cuid())
+  // 'session_created' | 'session_imported' | 'session_synced' |
+  // 'session_deleted' | 'session_restarted' | 'session_duplicated' |
+  // 'session_shared' | 'session_purged' | 'teacher_login' |
+  // 'teacher_locked' | 'teacher_password_changed' |
+  // 'teacher_password_reset' | 'teacher_account_created' |
+  // 'teacher_account_imported' | 'teacher_account_deleted' |
+  // 'admin_login' | 'admin_locked' | 'admin_password_changed' |
+  // 'admin_setup' | 'email_sent' | 'email_failed' | 'smtp_test'
+  type      String
+  // Auteur de l'action : email enseignant, 'admin', 'sync' (import
+  // machine), ou null (création anonyme / reconnexion PIN).
+  actor     String?
+  // Détail lisible SANS secret : « F9EUMQ — Cardio v1 », emails…
+  detail    String?
+  // Code de séance concernée (null pour les événements de comptes).
+  sessionCode String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }
