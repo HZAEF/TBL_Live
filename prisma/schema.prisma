@@ -83,6 +83,16 @@ model Session {
   // au lieu de transporter le snapshot complet. Colonne additive,
   // défaut 0 (les séances existantes démarrent simplement à zéro).
   eventSeq       Int      @default(0)
+  // v3.5.0 — Pondération de la note finale (en pourcentages) : la
+  // répartition HISTORIQUE 25/25/35/15 reste le DÉFAUT, l'enseignant
+  // peut l'adapter séance par séance depuis l'onglet Configurations
+  // (la somme des quatre doit faire exactement 100). Colonnes
+  // additives avec défauts : les séances existantes conservent la
+  // répartition historique sans aucune manipulation de base.
+  weightIrat     Float    @default(25)
+  weightTrat     Float    @default(25)
+  weightApp      Float    @default(35)
+  weightPeer     Float    @default(15)
   createdAt     DateTime @default(now())
 
   teams    Team[]
