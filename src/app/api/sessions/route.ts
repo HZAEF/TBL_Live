@@ -11,6 +11,7 @@ import {
 import { hashPin } from '@/lib/pin'
 import { requireTeacher } from '@/lib/teacher-auth'
 import { logAdminEvent } from '@/lib/admin-journal'
+import { isValidGradeWeights, sanitizeGradeWeights } from '@/lib/grades'
 import { SAI_SUBSCALES, DEFAULT_SAI_ITEMS, type SaiSubscale } from '@/lib/sai'
 
 // POST /api/sessions — création d'une séance TBL
@@ -62,6 +63,21 @@ export async function POST(req: NextRequest) {
 
     let iratMinutes = Number(body.iratMinutes)
     if (!Number.isInteger(iratMinutes) || iratMinutes < 1 || iratMinutes > 90) iratMinutes = 10
+
+    // v3.5.0 — pondération de la note finale : la répartition
+    // HISTORIQUE 25/25/35/15 est le DÉFAUT (aucune donnée envoyée →
+    // défaut) ; l'enseignant peut la personnaliser dès la création.
+    // Une pondération ENVOYÉE mais invalide est refusée (400).
+    if (body.weights !== undefined && !isValidGradeWeights(body.weights)) {
+      return NextResponse.json(
+        {
+          error:
+            'Pondération invalide : chaque pourcentage doit être entre 0 et 100 et la somme des quatre doit faire exactement 100.',
+        },
+        { status: 400 }
+      )
+    }
+    const weights = sanitizeGradeWeights(body.weights)
 
     // Questions (optionnelles à la création, modifiables ensuite)
     const rawQuestions = Array.isArray(body.questions) ? body.questions : []
@@ -151,6 +167,11 @@ export async function POST(req: NextRequest) {
         teacherPin: teacherPinHash,
         teacherToken,
         iratMinutes,
+        // v3.5.0 : pondération de la note finale (validée ci-dessus).
+        weightIrat: weights.irat,
+        weightTrat: weights.trat,
+        weightApp: weights.application,
+        weightPeer: weights.peer,
         // v3.0.0 : compte enseignant propriétaire de la séance.
         teacherId: auth.teacher.id,
         teams: {

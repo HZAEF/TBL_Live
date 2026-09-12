@@ -1,5 +1,5 @@
 import { db } from '@/lib/db'
-import { computeFinalGrade, type FinalGrade } from './grades'
+import { computeFinalGrade, sanitizeGradeWeights, type FinalGrade, type GradeWeights } from './grades'
 
 // ============================================================
 // TBL Live — v2.6.0 : notes finales côté serveur
@@ -12,9 +12,9 @@ import { computeFinalGrade, type FinalGrade } from './grades'
 //  - la note et le rang ne sont transmis qu'APRÈS la soumission du
 //    questionnaire de fin de séance (TBL-SAI).
 //
-// Le calcul reprend exactement la pondération de src/lib/grades.ts :
-// iRAT 25 % · tRAT 25 % · Application 35 % · Pairs 15 %, avec
-// redistribution des poids des composantes indisponibles.
+// v3.5.0 : la pondération est celle RÉGLÉE PAR L'ENSEIGNANT pour cette
+// séance (onglet Configurations ; défaut = 25/25/35/15 historique),
+// avec redistribution des poids des composantes indisponibles.
 // ============================================================
 
 export interface StudentFinalResult {
@@ -27,8 +27,12 @@ export interface StudentFinalResult {
  * de donnée, tout en base — aucune boucle de requêtes par étudiant).
  */
 export async function computeAllFinalGrades(sessionId: string): Promise<StudentFinalResult[]> {
-  const [students, ratQuestions, appQuestions, iratAnswers, tratAnswers, appAnswers, peerEvals] =
+  const [session, students, ratQuestions, appQuestions, iratAnswers, tratAnswers, appAnswers, peerEvals] =
     await Promise.all([
+      db.session.findUnique({
+        where: { id: sessionId },
+        select: { weightIrat: true, weightTrat: true, weightApp: true, weightPeer: true },
+      }),
       db.student.findMany({
         where: { sessionId },
         select: { id: true, teamId: true },
@@ -90,6 +94,17 @@ export async function computeAllFinalGrades(sessionId: string): Promise<StudentF
     peerByStudent.set(e.evaluatedId, cur)
   }
 
+  // v3.5.0 : pondération de la séance (renvoyée par la validation —
+  // défaut historique 25/25/35/15 si les colonnes sont absentes).
+  const weights: GradeWeights = session
+    ? sanitizeGradeWeights({
+        irat: session.weightIrat,
+        trat: session.weightTrat,
+        application: session.weightApp,
+        peer: session.weightPeer,
+      })
+    : sanitizeGradeWeights(null)
+
   return students.map((s) => {
     const peer = peerByStudent.get(s.id)
     const grade = computeFinalGrade({
@@ -104,7 +119,7 @@ export async function computeAllFinalGrades(sessionId: string): Promise<StudentF
       appScore: s.teamId ? (appCorrectByTeam.get(s.teamId) ?? 0) : null,
       appMax: appQuestions.length,
       peerAvg: peer && peer.n > 0 ? peer.sum / peer.n : null,
-    })
+    }, weights)
     return { studentId: s.id, grade }
   })
 }

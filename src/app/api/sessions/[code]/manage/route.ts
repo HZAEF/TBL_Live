@@ -28,6 +28,7 @@ import {
 import { requireTeacher } from '@/lib/teacher-auth'
 import { checkShareEmail, isSessionVisibleTo, MAX_COLLABORATORS } from '@/lib/sharing'
 import { logAdminEvent } from '@/lib/admin-journal'
+import { isValidGradeWeights, sanitizeGradeWeights } from '@/lib/grades'
 
 // v3.4.0 — Vercel (offre gratuite) limite les fonctions à 60 s :
 // export_sync d'une GROSSE séance (200 étudiants) + sync_now (tirage
@@ -49,6 +50,7 @@ const JOURNAL_TYPE: Record<string, SessionEventType> = {
   set_title: 'session_edit',
   set_pin: 'session_edit',
   set_irat_minutes: 'session_edit',
+  set_weights: 'session_edit',
   add_question: 'question_edit',
   update_question: 'question_edit',
   move_question: 'question_edit',
@@ -86,6 +88,14 @@ function journalDetailFromBody(action: string, body: Record<string, unknown>): s
       return text(body.title)
     case 'set_irat_minutes':
       return typeof body.minutes === 'number' ? `${body.minutes} min` : undefined
+    case 'set_weights': {
+      const w = body.weights as { irat?: unknown; trat?: unknown; application?: unknown; peer?: unknown } | undefined
+      if (w && [w.irat, w.trat, w.application, w.peer].every((v) => typeof v === 'number')) {
+        const f = (v: unknown) => String(Math.round((v as number) * 10) / 10).replace('.', ',')
+        return `iRAT ${f(w.irat)} % · tRAT ${f(w.trat)} % · Application ${f(w.application)} % · Pairs ${f(w.peer)} %`
+      }
+      return undefined
+    }
     case 'add_question':
     case 'update_question':
       return text((body.question as { text?: unknown } | undefined)?.text)
@@ -674,6 +684,33 @@ async function runManageAction(
         }
         await db.session.update({ where: { id: session.id }, data: { iratMinutes: minutes } })
         return NextResponse.json({ ok: true })
+      }
+
+      // v3.5.0 — Pondération de la note finale (onglet Configurations).
+      // Refus explicite d'une pondération invalide (chaque poids 0–100,
+      // somme exactement 100) : une erreur silencieuse appliquerait le
+      // défaut sans que l'enseignant ne le sache.
+      case 'set_weights': {
+        if (!isValidGradeWeights(body.weights)) {
+          return NextResponse.json(
+            {
+              error:
+                'Pondération invalide : chaque pourcentage doit être entre 0 et 100 et la somme des quatre doit faire exactement 100.',
+            },
+            { status: 400 }
+          )
+        }
+        const w = sanitizeGradeWeights(body.weights)
+        await db.session.update({
+          where: { id: session.id },
+          data: {
+            weightIrat: w.irat,
+            weightTrat: w.trat,
+            weightApp: w.application,
+            weightPeer: w.peer,
+          },
+        })
+        return NextResponse.json({ ok: true, weights: w })
       }
 
       case 'add_question': {
@@ -1465,6 +1502,11 @@ async function runManageAction(
             // plus haut) → elle apparaît dans « Mes séances ».
             teacherId: copyTeacherId,
             iratMinutes: session.iratMinutes,
+            // v3.5.0 : la pondération fait partie de la copie pédagogique.
+            weightIrat: session.weightIrat,
+            weightTrat: session.weightTrat,
+            weightApp: session.weightApp,
+            weightPeer: session.weightPeer,
             status: 'lobby',
             teams: {
               create: teams.map((t) => ({ name: t.name, number: t.number })),
@@ -1832,6 +1874,13 @@ async function runManageAction(
             title: session.title,
             status: session.status,
             iratMinutes: session.iratMinutes,
+            // v3.5.0 : pondération (une sauvegarde restaurée la conserve).
+            weights: {
+              irat: session.weightIrat,
+              trat: session.weightTrat,
+              application: session.weightApp,
+              peer: session.weightPeer,
+            },
             createdAt: session.createdAt,
             deletedAt: session.deletedAt,
             dataPurgedAt: session.dataPurgedAt,

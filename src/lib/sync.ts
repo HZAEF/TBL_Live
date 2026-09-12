@@ -3,6 +3,7 @@ import type { Session } from '@prisma/client'
 import { PHASE_ORDER } from './tbl-types'
 import { randomToken } from './tbl'
 import { APP_VERSION } from './version'
+import { isValidGradeWeights, sanitizeGradeWeights } from './grades'
 
 // ============================================================
 // TBL Live v2.7.0 — Synchronisation Internet ↔ réseau local
@@ -76,6 +77,15 @@ export interface BackupSessionCore {
    *  l'identifiant stable — le miroir distant résout cet email en
    * compte LOCAL pour que « Mes séances » fonctionne des deux côtés. */
   ownerEmail?: string | null
+  /** v3.5.0 : pondération de la note finale en pourcentages (absent
+   *  des sauvegardes antérieures → défaut 25/25/35/15 à l'import).
+   *  Validée à l'arrivée : somme = 100, chaque poids 0–100. */
+  weights?: {
+    irat: number
+    trat: number
+    application: number
+    peer: number
+  }
 }
 
 export interface SyncBackup {
@@ -264,6 +274,15 @@ export async function buildSyncBackup(session: Session): Promise<SyncBackup> {
       // l'arrivée : « Mes séances » du propriétaire fonctionne ainsi
       // sur la version en ligne ET sur la version locale.
       ownerEmail: owner?.email ?? null,
+      // v3.5.0 : pondération de la note finale — suit la séance d'une
+      // instance à l'autre (le réglage de l'enseignant ne se perd pas
+      // à la première synchronisation).
+      weights: {
+        irat: session.weightIrat,
+        trat: session.weightTrat,
+        application: session.weightApp,
+        peer: session.weightPeer,
+      },
     },
     secrets: {
       sessionId: session.id,
@@ -430,6 +449,9 @@ export async function replaceSessionFromBackup(
     ? (b.session.status as string)
     : 'lobby'
   const iratMinutes = int(b.session.iratMinutes ?? 10, 1, 90, 'durée iRAT')
+  // v3.5.0 — pondération de la note finale : validée (somme = 100) ;
+  // absente des sauvegardes antérieures → répartition historique.
+  const weights = sanitizeGradeWeights(b.session?.weights)
   const createdAt = date(b.session.createdAt)
   // v2.9.0 — CORRECTIF MINUTEUR : la date de début de PHASE doit venir de
   // la sauvegarde, pas de la date de CRÉATION de la séance. Avant ce
@@ -709,6 +731,11 @@ export async function replaceSessionFromBackup(
         teacherToken: finalToken,
         status,
         iratMinutes,
+        // v3.5.0 : pondération de la note finale (validée ci-dessus).
+        weightIrat: weights.irat,
+        weightTrat: weights.trat,
+        weightApp: weights.application,
+        weightPeer: weights.peer,
         // v2.9.0 : vraie date de début de phase (correctif minuteur).
         phaseStartedAt,
         revealed: false,
@@ -1318,6 +1345,26 @@ export async function mergePullIntoLocal(session: Session, backupRaw: unknown): 
       data.title = s.title
     if (typeof s?.iratMinutes === 'number' && Number.isInteger(s.iratMinutes) && s.iratMinutes >= 1 && s.iratMinutes <= 90 && s.iratMinutes !== session.iratMinutes)
       data.iratMinutes = s.iratMinutes
+    // v3.5.0 — pondération : dernier écrit gagne, comme le titre et la
+    // durée (l'enseignant peut régler sa pondération des deux côtés).
+    // Uniquement si le fichier DISTANT transporte explicitement le
+    // réglage (les versions antérieures ne le transportent pas : leur
+    // fusion ne doit jamais écraser la pondération réglée ici).
+    if (s?.weights && isValidGradeWeights(s.weights)) {
+      const w = sanitizeGradeWeights(s.weights)
+      if (
+        (w.irat !== session.weightIrat ||
+          w.trat !== session.weightTrat ||
+          w.application !== session.weightApp ||
+          w.peer !== session.weightPeer) &&
+        !data.weightIrat && !data.weightTrat && !data.weightApp && !data.weightPeer
+      ) {
+        data.weightIrat = w.irat
+        data.weightTrat = w.trat
+        data.weightApp = w.application
+        data.weightPeer = w.peer
+      }
+    }
   }
   if (Object.keys(data).length > 0) {
     await db.session.update({ where: { id: sid }, data })

@@ -37,7 +37,7 @@ import { cn } from '@/lib/utils'
 import { t, useI18n, formatDate } from '@/lib/i18n'
 import type { DashboardDTO } from '@/lib/tbl-types'
 import { LETTERS } from '@/lib/tbl-types'
-import { gradeForStudent, fmtNote } from '@/lib/grades'
+import { gradeForStudent, fmtNote, weightsOfSession, fmtWeightPct } from '@/lib/grades'
 import { SAI_SUBSCALES, SAI_SUBSCALE_INFO, saiItemText } from '@/lib/sai'
 import {
   analyzeSection,
@@ -1040,12 +1040,17 @@ function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: 
   const grades = data.students.map((s) => ({ s, g: gradeForStudent(data, s.id) }))
   const anyGrade = grades.some(({ g }) => g.final !== null)
   if (!anyGrade) return null
+  // v3.5.0 : pondération réglée par l'enseignant (défaut 25/25/35/15).
+  const w = weightsOfSession(data.session)
 
   return (
     <ResultSection
-      title={t(
-        'Note finale sur 20 — iRAT 25 % · tRAT 25 % · Application 35 % · Pairs 15 %'
-      )}
+      title={t('Note finale sur 20 — iRAT {a} % · tRAT {b} % · Application {c} % · Pairs {d} %', {
+        a: fmtWeightPct(w.irat),
+        b: fmtWeightPct(w.trat),
+        c: fmtWeightPct(w.application),
+        d: fmtWeightPct(w.peer),
+      })}
     >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[560px] text-sm">
@@ -1055,19 +1060,19 @@ function FinalGradesSection({ data, finished }: { data: DashboardDTO; finished: 
               <th className="py-2 pe-3 font-medium">{t('Équipe')}</th>
               <th className="py-2 px-1.5 text-center font-medium">
                 iRAT
-                <span className="block text-[10px] font-normal">25 %</span>
+                <span className="block text-[10px] font-normal">{fmtWeightPct(w.irat)} %</span>
               </th>
               <th className="py-2 px-1.5 text-center font-medium">
                 tRAT
-                <span className="block text-[10px] font-normal">25 %</span>
+                <span className="block text-[10px] font-normal">{fmtWeightPct(w.trat)} %</span>
               </th>
               <th className="py-2 px-1.5 text-center font-medium">
                 {t('Application')}
-                <span className="block text-[10px] font-normal">35 %</span>
+                <span className="block text-[10px] font-normal">{fmtWeightPct(w.application)} %</span>
               </th>
               <th className="py-2 px-1.5 text-center font-medium">
                 {t('Pairs')}
-                <span className="block text-[10px] font-normal">15 %</span>
+                <span className="block text-[10px] font-normal">{fmtWeightPct(w.peer)} %</span>
               </th>
               <th className="py-2 ps-3 text-center font-medium">{t('Note finale')}</th>
             </tr>
@@ -1901,6 +1906,15 @@ export function ConfigurationsTab({
   const [savingPin, setSavingPin] = useState(false)
   const [minutes, setMinutes] = useState(String(data.session.iratMinutes))
   const [savingMinutes, setSavingMinutes] = useState(false)
+  // v3.5.0 — pondération de la note finale : réglable ici, séance par
+  // séance (défaut historique 25/25/35/15). La note finale, le rang et
+  // les exports suivent immédiatement.
+  const sessionWeights = weightsOfSession(data.session)
+  const [wIrat, setWIrat] = useState(sessionWeights.irat)
+  const [wTrat, setWTrat] = useState(sessionWeights.trat)
+  const [wApp, setWApp] = useState(sessionWeights.application)
+  const [wPeer, setWPeer] = useState(sessionWeights.peer)
+  const [savingWeights, setSavingWeights] = useState(false)
   const [syncUrl, setSyncUrl] = useState(() => readSyncConfig(data.session.code)?.url ?? '')
   const [autoSync, setAutoSync] = useState(() => readSyncConfig(data.session.code)?.auto ?? false)
   const [syncing, setSyncing] = useState(false)
@@ -1969,7 +1983,7 @@ export function ConfigurationsTab({
           <p className="text-sm font-bold text-stone-900">{t('Paramètres de la séance')}</p>
           <p className="mt-0.5 text-xs text-stone-500">
             {t(
-              'Titre, durée et code PIN. Les questions et le questionnaire se modifient dans leurs onglets dédiés.'
+              'Titre, durée, code PIN et pondération de la note finale. Les questions et le questionnaire se modifient dans leurs onglets dédiés.'
             )}
           </p>
         </div>
@@ -2032,6 +2046,129 @@ export function ConfigurationsTab({
           >
             {t('Enregistrer')}
           </Button>
+        </div>
+
+        {/* v3.5.0 — pondération de la note finale (iRAT / tRAT /
+            Application / Pairs) : la demande de l'enseignante. Défaut
+            inchangé 25/25/35/15, la main est laissée à l'enseignant. */}
+        <div className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label className="text-sm">{t('Pondération de la note finale (%)')}</Label>
+            <span
+              className={cn(
+                'rounded-full px-2.5 py-0.5 text-xs font-bold',
+                Math.abs(wIrat + wTrat + wApp + wPeer - 100) <= 0.01
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-amber-100 text-amber-700'
+              )}
+            >
+              {t('Total : {n} %', { n: Math.round((wIrat + wTrat + wApp + wPeer) * 10) / 10 })}
+            </span>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {(
+              [
+                ['iRAT', wIrat, setWIrat],
+                ['tRAT', wTrat, setWTrat],
+                [t('Application'), wApp, setWApp],
+                [t('Pairs'), wPeer, setWPeer],
+              ] as const
+            ).map(([label, value, setter]) => (
+              <div key={label}>
+                <label
+                  className="block text-center text-xs font-medium text-stone-500"
+                  htmlFor={`cfg-w-${label}`}
+                >
+                  {label}
+                </label>
+                <Input
+                  id={`cfg-w-${label}`}
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.5"
+                  value={value}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    setter(Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0)
+                  }}
+                  className="mt-1 h-10 text-center"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-stone-500">
+              {t('La somme des quatre pourcentages doit faire exactement 100 %.')}
+            </p>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-stone-500"
+                disabled={
+                  wIrat === sessionWeights.irat &&
+                  wTrat === sessionWeights.trat &&
+                  wApp === sessionWeights.application &&
+                  wPeer === sessionWeights.peer
+                }
+                onClick={() => {
+                  setWIrat(sessionWeights.irat)
+                  setWTrat(sessionWeights.trat)
+                  setWApp(sessionWeights.application)
+                  setWPeer(sessionWeights.peer)
+                }}
+              >
+                {t('Annuler les modifications')}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs text-stone-500"
+                onClick={() => {
+                  setWIrat(25)
+                  setWTrat(25)
+                  setWApp(35)
+                  setWPeer(15)
+                }}
+              >
+                {t('Réinitialiser (25 · 25 · 35 · 15)')}
+              </Button>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            className="mt-2 h-10 bg-emerald-600 hover:bg-emerald-700"
+            disabled={
+              savingWeights ||
+              Math.abs(wIrat + wTrat + wApp + wPeer - 100) > 0.01 ||
+              (wIrat === sessionWeights.irat &&
+                wTrat === sessionWeights.trat &&
+                wApp === sessionWeights.application &&
+                wPeer === sessionWeights.peer)
+            }
+            onClick={async () => {
+              setSavingWeights(true)
+              await manage('set_weights', {
+                weights: { irat: wIrat, trat: wTrat, application: wApp, peer: wPeer },
+              })
+              setSavingWeights(false)
+            }}
+          >
+            {savingWeights ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-1 h-4 w-4" />
+            )}
+            {t('Enregistrer')}
+          </Button>
+          <p className="mt-1.5 text-xs text-stone-500">
+            {t(
+              'La pondération s’applique aux notes finales : tableau « Résultats », note et rang des étudiants, exports Excel et CSV.'
+            )}
+          </p>
         </div>
 
         <div className="grid gap-2 border-t border-stone-100 pt-4 sm:grid-cols-2">
@@ -2399,10 +2536,14 @@ export function buildResultsMatrix(
     t('tRAT équipe (total sur {n})', { n: ratQs.length * 4 }),
     ...appQs.map((q, i) => appColumnLabel(q, i)),
     t('Note pairs (moyenne sur 5)'),
-    t('iRAT sur 20 (25%)'),
-    t('tRAT sur 20 (25%)'),
-    t('Application sur 20 (35%)'),
-    t('Pairs sur 20 (15%)'),
+    // v3.5.0 : les poids annoncés dans les en-têtes sont ceux RÉGLÉS
+    // par l'enseignant (défaut 25/25/35/15).
+    t('iRAT sur 20 ({p}%)', { p: fmtWeightPct(weightsOfSession(data.session).irat) }),
+    t('tRAT sur 20 ({p}%)', { p: fmtWeightPct(weightsOfSession(data.session).trat) }),
+    t('Application sur 20 ({p}%)', {
+      p: fmtWeightPct(weightsOfSession(data.session).application),
+    }),
+    t('Pairs sur 20 ({p}%)', { p: fmtWeightPct(weightsOfSession(data.session).peer) }),
     t('NOTE FINALE sur 20'),
   ])
   for (const s of data.students) {

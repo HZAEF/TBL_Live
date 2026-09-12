@@ -235,6 +235,14 @@ async function doGET(
         owner: ownerAccount
           ? { email: ownerAccount.email, name: `${ownerAccount.firstName} ${ownerAccount.lastName}` }
           : null,
+        // v3.5.0 : pondération de la note finale (modifiable dans
+        // l'onglet Configurations — défaut 25/25/35/15).
+        weights: {
+          irat: live.weightIrat,
+          trat: live.weightTrat,
+          application: live.weightApp,
+          peer: live.weightPeer,
+        },
       },
       questions: questions.map((q) => ({
         id: q.id,

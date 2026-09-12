@@ -26,6 +26,7 @@ import {
   saveTeacherSession,
   type StoredTeacherSession,
 } from '@/lib/tbl-client'
+import { cn } from '@/lib/utils'
 import { exampleContent, emptyQuestion, emptyCase, QuestionEditor } from './question-editor'
 import { TeacherDashboard } from './teacher-dashboard'
 import {
@@ -660,6 +661,13 @@ function CreateSessionForm({
   const [pin, setPin] = useState('')
   const [teamCount, setTeamCount] = useState(6)
   const [iratMinutes, setIratMinutes] = useState(10)
+  // v3.5.0 : pondération de la note finale (défaut = répartition
+  // historique 25/25/35/15 ; ajustable ici OU plus tard dans
+  // l'onglet Configurations du tableau de bord).
+  const [wIrat, setWIrat] = useState(25)
+  const [wTrat, setWTrat] = useState(25)
+  const [wApp, setWApp] = useState(35)
+  const [wPeer, setWPeer] = useState(15)
   // Questions de préparation (iRAT puis tRAT)
   const [questions, setQuestions] = useState<DraftQuestion[]>([emptyQuestion('rat')])
   // Cas cliniques d'application : énoncé + 3 à 5 QCU, affichés un par un
@@ -738,6 +746,13 @@ function CreateSessionForm({
       setGlobalError(t('Le libellé de l’item doit contenir au moins 3 caractères.'))
       return
     }
+    // v3.5.0 : la pondération envoyée doit sommer à 100 (le serveur
+    // refuse sinon — même message).
+    const wSum = Math.round((wIrat + wTrat + wApp + wPeer) * 10) / 10
+    if (Math.abs(wSum - 100) > 0.01) {
+      setGlobalError(t('La somme des quatre pourcentages doit faire exactement 100 %.'))
+      return
+    }
     setGlobalError('')
     setSubmitting(true)
     try {
@@ -748,6 +763,7 @@ function CreateSessionForm({
           pin,
           teamCount,
           iratMinutes,
+          weights: { irat: wIrat, trat: wTrat, application: wApp, peer: wPeer },
           // v2.6.0 : questionnaire personnalisé — envoyé UNIQUEMENT si
           // l'enseignant a ouvert la personnalisation (sinon le serveur
           // sème les 33 items standard multilingues).
@@ -875,6 +891,75 @@ function CreateSessionForm({
               }
               className="mt-1.5 h-11"
             />
+          </div>
+        </div>
+
+        {/* v3.5.0 — pondération de la note finale (défaut 25/25/35/15,
+            modifiable aussi plus tard dans l'onglet Configurations). */}
+        <div className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Label className="text-sm">{t('Pondération de la note finale (%)')}</Label>
+            <span
+              className={cn(
+                'rounded-full px-2.5 py-0.5 text-xs font-bold',
+                Math.abs(wIrat + wTrat + wApp + wPeer - 100) <= 0.01
+                  ? 'bg-emerald-100 text-emerald-700'
+                  : 'bg-amber-100 text-amber-700'
+              )}
+            >
+              {t('Total : {n} %', { n: Math.round((wIrat + wTrat + wApp + wPeer) * 10) / 10 })}
+            </span>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {(
+              [
+                ['iRAT', wIrat, setWIrat],
+                ['tRAT', wTrat, setWTrat],
+                [t('Application'), wApp, setWApp],
+                [t('Pairs'), wPeer, setWPeer],
+              ] as const
+            ).map(([label, value, setter]) => (
+              <div key={label}>
+                <label
+                  className="block text-center text-xs font-medium text-stone-500"
+                  htmlFor={`w-${label}`}
+                >
+                  {label}
+                </label>
+                <Input
+                  id={`w-${label}`}
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="0.5"
+                  value={value}
+                  onChange={(e) => {
+                    const n = Number(e.target.value)
+                    setter(Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0)
+                  }}
+                  className="mt-1 h-10 text-center"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-stone-500">
+              {t('La somme des quatre pourcentages doit faire exactement 100 %.')}
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs text-stone-500"
+              onClick={() => {
+                setWIrat(25)
+                setWTrat(25)
+                setWApp(35)
+                setWPeer(15)
+              }}
+            >
+              {t('Réinitialiser (25 · 25 · 35 · 15)')}
+            </Button>
           </div>
         </div>
       </div>

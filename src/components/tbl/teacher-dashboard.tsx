@@ -1993,6 +1993,8 @@ function journalEventLabel(
           return t('Code PIN modifié')
         case 'set_irat_minutes':
           return t('Durée du iRAT modifiée')
+        case 'set_weights':
+          return t('Pondération de la note finale modifiée')
         case 'add_case':
           return t('Cas clinique ajouté')
         case 'update_case':

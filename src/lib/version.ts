@@ -1,5 +1,5 @@
 // ============================================================
-// TBL Live v3.4.0 — Version de l'application (source unique).
+// TBL Live v3.5.0 — Version de l'application (source unique).
 //
 // Utilisée par /api/config (la sonde de diagnostic de la synchro-
 // nisation compare la version LOCALE à la version EN LIGNE : un
@@ -9,4 +9,4 @@
 // Le script d'empaquetage vérifie l'égalité package.json ↔ ici.
 // ============================================================
 
-export const APP_VERSION = '3.4.0'
+export const APP_VERSION = '3.5.0'

@@ -88,6 +88,15 @@ export interface DashboardDTO {
     collaborators?: { email: string; addedAt: string; hasAccount: boolean; name: string | null }[]
     /** v3.2.0 : compte propriétaire (null = séance sans propriétaire). */
     owner?: { email: string; name: string } | null
+    /** v3.5.0 : pondération de la note finale en pourcentages
+     *  (somme 100 ; défaut historique 25/25/35/15 — l'enseignant
+     *  peut l'adapter depuis l'onglet Configurations). */
+    weights?: {
+      irat: number
+      trat: number
+      application: number
+      peer: number
+    }
   }
   questions: QuestionDTO[]
   cases: CaseDTO[]
